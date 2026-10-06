@@ -188,14 +188,14 @@ upstreams:
     fallback: true
     priority: 3
     models:
-      "claude-opus-*": grok-4
-    model: grok-4-fast
+      "claude-opus-*": grok-4.7
+    model: grok-4.5
 ```
 
 Requests go to `claude-primary`, then `claude-secondary` when it's
 limited, then `grok` once both are. When a Claude key's limit resets,
-traffic returns to it. Opus requests run on `grok-4` and everything else
-on `grok-4-fast`.
+traffic returns to it. Opus requests run on `grok-4.7` and everything else
+on `grok-4.5`.
 
 | field        | meaning |
 |--------------|---------|

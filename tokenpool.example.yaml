@@ -61,5 +61,5 @@ upstreams:
     # Requests name Claude models; map them to Grok models. The most
     # specific pattern wins, and `model` covers everything else.
     models:
-      "claude-opus-*": grok-4
-    model: grok-4-fast
+      "claude-opus-*": grok-4.7
+    model: grok-4.5
