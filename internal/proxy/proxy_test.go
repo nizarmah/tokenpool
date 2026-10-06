@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nizarmah/tokenpool/internal/config"
 	"github.com/nizarmah/tokenpool/internal/pool"
@@ -241,6 +243,46 @@ func TestClaudeKeysThenGrokFallback(t *testing.T) {
 	res, _ = call(t, "POST", srv.URL+"/v1/messages", "tp-alice-0123456789", nonStream)
 	if res.Header.Get("X-Tokenpool-Upstream") != "claude-primary" {
 		t.Errorf("after reset served by %q", res.Header.Get("X-Tokenpool-Upstream"))
+	}
+}
+
+func TestTokenFileIsReadPerRequest(t *testing.T) {
+	grok := newFake(t, grokStream)
+	claude := newFake(t, claudeMessage)
+	file := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(file, []byte(`{"access_token":"session-one"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, p := newProxy(t, poolYAML("", fmt.Sprintf(
+		"  - {name: grok, url: %q, format: openai, token_file: %q, priority: 1}\n", grok.URL+"/v1", file),
+		fmt.Sprintf("  - {name: claude, url: %q, format: anthropic, token: sk-ant-claude, priority: 2}\n", claude.URL)), "")
+
+	call(t, "POST", srv.URL+"/v1/messages", "tp-alice-0123456789", messagesBody)
+	if got := grok.calls()[0].header.Get("Authorization"); got != "Bearer session-one" {
+		t.Fatalf("first auth = %q", got)
+	}
+
+	// The tool that owns the file refreshes it; the next request uses the new token.
+	later := time.Now().Add(time.Minute)
+	if err := os.WriteFile(file, []byte(`{"access_token":"session-two"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(file, later, later)
+	call(t, "POST", srv.URL+"/v1/messages", "tp-alice-0123456789", messagesBody)
+	if got := grok.calls()[1].header.Get("Authorization"); got != "Bearer session-two" {
+		t.Fatalf("after refresh auth = %q", got)
+	}
+
+	// A file that disappears benches the upstream and fails over.
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	res, _ := call(t, "POST", srv.URL+"/v1/messages", "tp-alice-0123456789", messagesBody)
+	if res.Header.Get("X-Tokenpool-Upstream") != "claude" || len(grok.calls()) != 2 {
+		t.Errorf("served by %q, grok calls %d", res.Header.Get("X-Tokenpool-Upstream"), len(grok.calls()))
+	}
+	if st, _ := p.Get("grok"); st.State != "cooling" || !strings.Contains(st.CooldownReason, "token_file") {
+		t.Errorf("grok = %+v", st)
 	}
 }
 

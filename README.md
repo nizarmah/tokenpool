@@ -203,6 +203,8 @@ on `grok-4.5`.
 | `url`        | API base. `anthropic`: like the Anthropic SDK, no `/v1` (`https://api.anthropic.com`). `openai`: like the OpenAI SDK, with `/v1` (`https://api.x.ai/v1`); a bare host gets `/v1`. A URL that already ends in `/v1/messages` or `/chat/completions` is used as is. |
 | `format`     | `anthropic` (Messages API) or `openai` (Chat Completions). |
 | `token`      | The upstream's API key. |
+| `token_file` | Read the key from this file instead, re-read whenever the file changes. See [Keys from a file](#keys-from-a-file). |
+| `token_field` | Dot path to the key inside a JSON `token_file`, such as `tokens.access_token`. |
 | `auth`       | `x-api-key` (default for anthropic), `bearer` (default for openai), `header:<Name>`, or `none`. |
 | `model`      | Replaces the requested model. With `models` set, it covers models that match no pattern. |
 | `models`     | Requested model to upstream model. `*` is a wildcard and the most specific pattern wins. An empty value passes the model through. With `models` set and no `model`, the upstream only serves models that match. |
@@ -211,6 +213,36 @@ on `grok-4.5`.
 | `priority`   | Lower is tried first. Ties go in file order. |
 | `fallback`   | `true` keeps the upstream in reserve: it's tried only after every non-fallback upstream, whatever its priority. Several fallbacks are tried by priority among themselves. |
 | `disabled`   | Keeps the entry in the pool but sends it no traffic. |
+
+### Keys from a file
+
+For a token that another tool keeps refreshed, such as a secrets agent,
+a mounted Kubernetes secret or a CLI's login file, point `token_file` at
+it instead of writing `token`:
+
+```yaml
+  - name: gateway
+    url: https://llm-gateway.example.com/v1
+    format: openai
+    token_file: /run/secrets/gateway-token.json
+    token_field: credentials.access_token   # omit for a bare-token file
+```
+
+tokenpool checks the file on every request and re-reads it when it
+changes, so a refreshed token is used right away. A file holding just the
+token works as is. For JSON, tokenpool uses `token_field`, or else a
+top-level `access_token`, `accessToken` or `token`. It refuses to start
+when the file can't be read or parsed. Later read errors bench the
+upstream like any other failure, and error messages never quote the file.
+
+`token_file` can only be set in the config file. The admin API rejects
+it, because an admin-added upstream could otherwise send any file on the
+server to any URL. The token is still subject to the provider's terms, so
+make sure the credential is one you're allowed to use this way.
+
+In Docker, mount the file's directory rather than the file itself. Tools
+that refresh a token usually replace the file, and a single-file mount
+keeps showing the old copy.
 
 ### Top-level settings
 

@@ -210,6 +210,10 @@ func (s *Server) serve(k kind) http.HandlerFunc {
 					return
 				}
 				reason := "unreachable: " + err.Error()
+				var tokErr tokenError
+				if errors.As(err, &tokErr) {
+					reason = tokErr.Error()
+				}
 				s.pool.Fail(c.Upstream, 0, s.cfg.Cooldowns.Error, reason)
 				log.Warn("failing over", "upstream", c.Name, "reason", reason, "cooldown", s.cfg.Cooldowns.Error)
 				failures = append(failures, c.Name+": "+reason)
@@ -302,6 +306,12 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int{"input_tokens": max(len(body)/4, 1)})
 }
 
+// tokenError means the upstream's token_file couldn't be read.
+type tokenError struct{ err error }
+
+func (e tokenError) Error() string { return e.err.Error() }
+func (e tokenError) Unwrap() error { return e.err }
+
 type badRequestError struct{ err error }
 
 func (e badRequestError) Error() string { return e.err.Error() }
@@ -313,6 +323,10 @@ func (s *Server) send(r *http.Request, k kind, c pool.Candidate, body []byte) (*
 	if err != nil {
 		return nil, badRequestError{err}
 	}
+	token, err := c.AuthToken()
+	if err != nil {
+		return nil, tokenError{err}
+	}
 	query := ""
 	if k.format() == c.Format {
 		query = r.URL.RawQuery // e.g. Claude Code's ?beta=true
@@ -322,7 +336,7 @@ func (s *Server) send(r *http.Request, k kind, c pool.Candidate, body []byte) (*
 	if err != nil {
 		return nil, err
 	}
-	setUpstreamHeaders(req.Header, r.Header, c, k)
+	setUpstreamHeaders(req.Header, r.Header, c, k, token)
 	return s.client.Do(req)
 }
 
@@ -366,7 +380,7 @@ func upstreamURL(u config.Upstream, k kind, query string) string {
 	return base + path
 }
 
-func setUpstreamHeaders(h, in http.Header, c pool.Candidate, k kind) {
+func setUpstreamHeaders(h, in http.Header, c pool.Candidate, k kind, token string) {
 	h.Set("Content-Type", "application/json")
 	h.Set("User-Agent", "tokenpool/"+Version)
 	if c.Format == config.Anthropic {
@@ -383,11 +397,11 @@ func setUpstreamHeaders(h, in http.Header, c pool.Candidate, k kind) {
 	}
 	switch auth := c.AuthStyle(); {
 	case auth == "bearer":
-		h.Set("Authorization", "Bearer "+c.Token)
+		h.Set("Authorization", "Bearer "+token)
 	case auth == "x-api-key":
-		h.Set("X-Api-Key", c.Token)
+		h.Set("X-Api-Key", token)
 	case strings.HasPrefix(auth, "header:"):
-		h.Set(strings.TrimPrefix(auth, "header:"), c.Token)
+		h.Set(strings.TrimPrefix(auth, "header:"), token)
 	}
 	for name, value := range c.Headers {
 		h.Set(name, value)

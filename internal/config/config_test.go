@@ -31,6 +31,10 @@ upstreams:
     format: openai
     token: literal-$not-expanded
     model: grok-4
+  - name: grok-file
+    url: https://api.x.ai/v1
+    format: openai
+    token_file: secrets/grok.json
 `)
 	cfg, err := Load(path)
 	if err != nil {
@@ -44,6 +48,9 @@ upstreams:
 	}
 	if got := cfg.Upstreams[1].Token; got != "literal-$not-expanded" {
 		t.Errorf("grok token = %q, want $ without braces left alone", got)
+	}
+	if got := cfg.Upstreams[2].TokenFile; got != filepath.Join(dir, "secrets", "grok.json") {
+		t.Errorf("token_file = %q, want it resolved next to the config", got)
 	}
 	if cfg.PoolFile != filepath.Join(dir, "pool.json") {
 		t.Errorf("pool_file = %q, want it next to the config", cfg.PoolFile)
@@ -61,21 +68,23 @@ upstreams:
 
 func TestParseErrors(t *testing.T) {
 	tests := map[string]string{
-		"no client keys":    `upstreams: []`,
-		"unset env var":     "client_keys: {a: ${TP_TEST_UNSET_VAR}}",
-		"unknown field":     "allow_anonymous: true\nlisten_addr: :1",
-		"bad format":        "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: grpc}]",
-		"bad url":           "allow_anonymous: true\nupstreams: [{name: a, url: 'x.com', format: openai}]",
-		"bad name":          "allow_anonymous: true\nupstreams: [{name: 'a b', url: 'http://x', format: openai}]",
-		"duplicate name":    "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai}, {name: a, url: 'http://y', format: openai}]",
-		"bad auth":          "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, auth: basic}]",
-		"bad strategy":      "allow_anonymous: true\nstrategy: random",
-		"shared key":        "client_keys: {a: kkkkkkkkkkkkkkkkkk, b: kkkkkkkkkkkkkkkkkk}",
-		"admin=client key":  "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nadmin_key: kkkkkkkkkkkkkkkkkk",
-		"short client key":  "client_keys: {a: tooshort}",
-		"short admin key":   "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nadmin_key: short",
-		"placeholder key":   "client_keys: {a: '<tokenpool keygen output>'}",
-		"placeholder token": "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token: '<xAI API key>'}]",
+		"no client keys":       `upstreams: []`,
+		"unset env var":        "client_keys: {a: ${TP_TEST_UNSET_VAR}}",
+		"unknown field":        "allow_anonymous: true\nlisten_addr: :1",
+		"bad format":           "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: grpc}]",
+		"bad url":              "allow_anonymous: true\nupstreams: [{name: a, url: 'x.com', format: openai}]",
+		"bad name":             "allow_anonymous: true\nupstreams: [{name: 'a b', url: 'http://x', format: openai}]",
+		"duplicate name":       "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai}, {name: a, url: 'http://y', format: openai}]",
+		"bad auth":             "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, auth: basic}]",
+		"bad strategy":         "allow_anonymous: true\nstrategy: random",
+		"shared key":           "client_keys: {a: kkkkkkkkkkkkkkkkkk, b: kkkkkkkkkkkkkkkkkk}",
+		"admin=client key":     "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nadmin_key: kkkkkkkkkkkkkkkkkk",
+		"short client key":     "client_keys: {a: tooshort}",
+		"short admin key":      "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nadmin_key: short",
+		"placeholder key":      "client_keys: {a: '<tokenpool keygen output>'}",
+		"token and token_file": "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token: t, token_file: /f}]",
+		"token_field alone":    "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token_field: x}]",
+		"placeholder token":    "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token: '<xAI API key>'}]",
 	}
 	for name, doc := range tests {
 		t.Run(name, func(t *testing.T) {

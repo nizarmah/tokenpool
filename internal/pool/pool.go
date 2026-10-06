@@ -27,9 +27,10 @@ var (
 type Upstream struct {
 	config.Upstream // resolved: env references expanded
 
-	raw    config.Upstream // as written, for the pool file
-	static bool            // from the config file, not the admin API
-	seq    int
+	raw     config.Upstream // as written, for the pool file
+	static  bool            // from the config file, not the admin API
+	seq     int
+	fileTok *fileToken // set when the token comes from token_file
 
 	// Guarded by Pool.mu.
 	disabled      bool
@@ -39,6 +40,15 @@ type Upstream struct {
 	requests      int64
 	failures      int64
 	lastUsed      time.Time
+}
+
+// AuthToken returns the token to send upstream, reading token_file when
+// the upstream has one.
+func (u *Upstream) AuthToken() (string, error) {
+	if u.fileTok == nil {
+		return u.Token, nil
+	}
+	return u.fileTok.get()
 }
 
 // Candidate is an upstream chosen for a request, with the model to send it.
@@ -72,7 +82,10 @@ type Pool struct {
 func New(strategy string, static []config.Upstream, file string) (*Pool, error) {
 	p := &Pool{strategy: strategy, file: file, now: time.Now}
 	for _, u := range static {
-		p.insert(u, u, true)
+		// Fail at startup on a token_file that can't be read or parsed.
+		if _, err := p.insert(u, u, true).AuthToken(); err != nil {
+			return nil, fmt.Errorf("upstream %q: %w", u.Name, err)
+		}
 	}
 	if file == "" {
 		return p, nil
@@ -89,6 +102,9 @@ func New(strategy string, static []config.Upstream, file string) (*Pool, error) 
 		if err := resolved.Validate(); err != nil {
 			return nil, fmt.Errorf("%s: %w", file, err)
 		}
+		if raw.TokenFile != "" {
+			return nil, fmt.Errorf("%s: upstream %q: token_file can only be set in the config file", file, raw.Name)
+		}
 		if p.find(raw.Name) != nil {
 			return nil, fmt.Errorf("%s: upstream %q is also in the config file", file, raw.Name)
 		}
@@ -103,6 +119,9 @@ func (p *Pool) SetClock(now func() time.Time) { p.now = now }
 func (p *Pool) insert(raw, resolved config.Upstream, static bool) *Upstream {
 	p.seq++
 	u := &Upstream{Upstream: resolved, raw: raw, static: static, seq: p.seq, disabled: resolved.Disabled}
+	if resolved.TokenFile != "" {
+		u.fileTok = &fileToken{path: resolved.TokenFile, field: resolved.TokenField}
+	}
 	p.add(u)
 	return u
 }
@@ -236,6 +255,7 @@ type Status struct {
 	Format         config.Format     `json:"format"`
 	Auth           string            `json:"auth"`
 	Token          string            `json:"token,omitempty"`
+	TokenFile      string            `json:"token_file,omitempty"`
 	Model          string            `json:"model,omitempty"`
 	Models         map[string]string `json:"models,omitempty"`
 	MaxTokens      int               `json:"max_tokens,omitempty"`
@@ -278,7 +298,7 @@ func (p *Pool) status(u *Upstream) Status {
 	now := p.now()
 	s := Status{
 		Name: u.Name, URL: u.raw.URL, Format: u.Format, Auth: u.AuthStyle(),
-		Token: redact(u.Token), Model: u.Model, Models: u.Models, MaxTokens: u.MaxTokens,
+		Token: redact(u.Token), TokenFile: u.TokenFile, Model: u.Model, Models: u.Models, MaxTokens: u.MaxTokens,
 		Priority: u.Priority, Fallback: u.Fallback, Source: "api", State: "available",
 		LastStatus: u.lastStatus, Requests: u.requests, Failures: u.failures,
 	}
@@ -429,6 +449,11 @@ type poolFile struct {
 }
 
 func resolveNew(raw config.Upstream) (config.Upstream, error) {
+	if raw.TokenFile != "" {
+		// Letting the admin API point at files would let it send any
+		// file on the server to any URL.
+		return raw, fmt.Errorf("%w: token_file can only be set in the config file", ErrInvalid)
+	}
 	resolved, err := raw.Resolve()
 	if err == nil {
 		err = resolved.Validate()

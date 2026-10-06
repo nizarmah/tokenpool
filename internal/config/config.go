@@ -36,6 +36,14 @@ type Upstream struct {
 	Format Format `yaml:"format" json:"format"`
 	// Token is the credential sent upstream, written inline or as ${ENV_VAR}.
 	Token string `yaml:"token,omitempty" json:"token,omitempty"`
+	// TokenFile reads the credential from a file instead, re-reading it
+	// whenever the file changes, for tokens another tool keeps refreshed.
+	// Config file only: the admin API can't set it.
+	TokenFile string `yaml:"token_file,omitempty" json:"token_file,omitempty"`
+	// TokenField picks the token out of a JSON token file, as a dot path
+	// such as "tokens.access_token". Without it, tokenpool looks for a
+	// top-level access_token, accessToken or token.
+	TokenField string `yaml:"token_field,omitempty" json:"token_field,omitempty"`
 	// Auth says how the token is sent: bearer, x-api-key, header:<Name> or none.
 	// Defaults to x-api-key for anthropic and bearer for openai.
 	Auth string `yaml:"auth,omitempty" json:"auth,omitempty"`
@@ -106,6 +114,11 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.PoolFile != "" && !filepath.IsAbs(cfg.PoolFile) {
 		cfg.PoolFile = filepath.Join(filepath.Dir(path), cfg.PoolFile)
+	}
+	for i, u := range cfg.Upstreams {
+		if u.TokenFile != "" && !filepath.IsAbs(u.TokenFile) {
+			cfg.Upstreams[i].TokenFile = filepath.Join(filepath.Dir(path), u.TokenFile)
+		}
 	}
 	return cfg, nil
 }
@@ -256,6 +269,14 @@ func (u Upstream) Validate() error {
 	if isPlaceholder(u.Token) {
 		return fmt.Errorf("upstream %q: token is still a placeholder: replace %s with the real key", u.Name, u.Token)
 	}
+	switch {
+	case u.Token != "" && u.TokenFile != "":
+		return fmt.Errorf("upstream %q: set token or token_file, not both", u.Name)
+	case u.TokenField != "" && u.TokenFile == "":
+		return fmt.Errorf("upstream %q: token_field needs token_file", u.Name)
+	case isPlaceholder(u.TokenFile):
+		return fmt.Errorf("upstream %q: token_file is still a placeholder", u.Name)
+	}
 	for name, value := range u.Headers {
 		if isPlaceholder(value) {
 			return fmt.Errorf("upstream %q: headers.%s is still a placeholder", u.Name, name)
@@ -292,6 +313,9 @@ func (u Upstream) Resolve() (Upstream, error) {
 	}
 	if u.Token, err = Expand(u.Token); err != nil {
 		return u, fmt.Errorf("token: %w", err)
+	}
+	if u.TokenFile, err = Expand(u.TokenFile); err != nil {
+		return u, fmt.Errorf("token_file: %w", err)
 	}
 	if len(u.Headers) > 0 {
 		headers := make(map[string]string, len(u.Headers))

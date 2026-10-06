@@ -134,8 +134,12 @@ func printPool(w io.Writer, ups []pool.Status) {
 		if u.Fallback {
 			role = "fallback"
 		}
+		token := u.Token
+		if u.TokenFile != "" {
+			token = "file:" + u.TokenFile
+		}
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			role, u.Priority, u.Name, u.Format, u.URL, model, u.Token, u.Source, u.State)
+			role, u.Priority, u.Name, u.Format, u.URL, model, token, u.Source, u.State)
 	}
 	tw.Flush()
 }
