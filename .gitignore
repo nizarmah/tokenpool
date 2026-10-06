@@ -1,0 +1,9 @@
+# Built binary
+/tokenpool
+/bin/
+
+# Real configs and runtime state hold API keys: never commit them.
+tokenpool.yaml
+*.tokenpool.yaml
+pool.json
+*.tmp

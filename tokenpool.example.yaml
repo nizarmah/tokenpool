@@ -1,0 +1,65 @@
+# tokenpool configuration.
+#
+#   cp tokenpool.example.yaml tokenpool.yaml && chmod 600 tokenpool.yaml
+#
+# Then replace every <...> value; tokenpool refuses to start while one is
+# left. tokenpool.yaml holds your API keys, so keep it private: it is in
+# .gitignore, and tokenpool warns at startup if other users can read it.
+#
+# Any value can be written inline, as below, or as ${ENV_VAR} to read it
+# from tokenpool's environment (an unset variable stops startup).
+
+listen: ":8080"   # "127.0.0.1:8080" to accept local connections only
+
+# One key per person or app that calls tokenpool, at least 16 characters.
+# Generate each with `tokenpool keygen`. Clients send it as x-api-key or
+# "Authorization: Bearer". The names show up in the logs.
+client_keys:
+  alice: "<tokenpool keygen output>"
+  bob: "<tokenpool keygen output>"
+
+# Turns on /admin/upstreams, which adds, removes, pauses and resets
+# upstreams at runtime. Leave it out to keep the admin API off. Upstreams
+# added there are saved to pool_file (mode 0600).
+admin_key: "<tokenpool keygen output>"
+pool_file: pool.json
+
+# How long an upstream sits out after a failure, unless the upstream says
+# itself (Retry-After or rate-limit reset headers).
+cooldowns:
+  rate_limit: 1m    # 429
+  overloaded: 15s   # 503 / 529
+  error: 30s        # 5xx, timeouts, connection errors
+  auth: 10m         # 401 / 403: bad or revoked key
+  quota: 1h         # 402, or "credit balance too low" / "quota exceeded"
+  max: 24h          # upper bound on any cooldown
+
+# The pool. Requests go to the lowest priority first and move down the
+# list as upstreams hit their limits. An upstream with `fallback: true`
+# only takes traffic once every other upstream is limited or failing.
+# format is the API the upstream speaks: anthropic (Messages API) or
+# openai (Chat Completions); tokenpool translates between them.
+upstreams:
+  - name: claude-primary
+    url: https://api.anthropic.com
+    format: anthropic
+    token: "<Anthropic API key, sk-ant-api03-...>"
+    priority: 1
+
+  - name: claude-secondary
+    url: https://api.anthropic.com
+    format: anthropic
+    token: "<another Anthropic API key>"
+    priority: 2
+
+  - name: grok
+    url: https://api.x.ai/v1
+    format: openai
+    token: "<xAI API key, xai-...>"
+    fallback: true
+    priority: 3
+    # Requests name Claude models; map them to Grok models. The most
+    # specific pattern wins, and `model` covers everything else.
+    models:
+      "claude-opus-*": grok-4
+    model: grok-4-fast
