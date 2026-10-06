@@ -215,7 +215,7 @@ func (s *Server) serve(k kind) http.HandlerFunc {
 					reason = tokErr.Error()
 				}
 				s.pool.Fail(c.Upstream, 0, s.cfg.Cooldowns.Error, reason)
-				log.Warn("failing over", "upstream", c.Name, "reason", reason, "cooldown", s.cfg.Cooldowns.Error)
+				log.Warn("failing over", "upstream", c.Name, "reason", reason, "cooldown", s.cfg.Cooldowns.Error.String())
 				failures = append(failures, c.Name+": "+reason)
 				allLimits = false
 				continue
@@ -255,7 +255,7 @@ func (s *Server) serve(k kind) http.HandlerFunc {
 				s.pool.Fail(c.Upstream, res.StatusCode, v.cooldown, v.reason)
 			}
 			log.Warn("failing over", "upstream", c.Name, "status", res.StatusCode,
-				"reason", v.reason, "cooldown", v.cooldown)
+				"reason", v.reason, "cooldown", v.cooldown.String())
 			failures = append(failures, c.Name+": "+v.reason)
 			allLimits = allLimits && v.limit
 		}
@@ -279,6 +279,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	log := s.log.With("client", clientName(r.Context()), "api", "count_tokens", "model", head.Model)
 	for _, c := range s.pool.Pick(head.Model).Candidates {
 		if c.Format != config.Anthropic {
 			continue
@@ -288,6 +289,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 			if r.Context().Err() != nil {
 				return
 			}
+			log.Warn("count failed, trying the next upstream", "upstream", c.Name, "error", err)
 			continue
 		}
 		if res.StatusCode >= 200 && res.StatusCode < 300 {
@@ -296,11 +298,14 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		errBody, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		res.Body.Close()
-		if classify(res.StatusCode, res.Header, errBody, s.cfg.Cooldowns, time.Now()).action == relay {
+		v := classify(res.StatusCode, res.Header, errBody, s.cfg.Cooldowns, time.Now())
+		if v.action == relay {
 			relayError(w, res, errBody, kindCountTokens, c)
 			return
 		}
+		log.Warn("count failed, trying the next upstream", "upstream", c.Name, "status", res.StatusCode, "reason", v.reason)
 	}
+	log.Info("no upstream could count; estimating")
 	// About four bytes of JSON per token: rough, but enough for budgeting.
 	w.Header().Set("X-Tokenpool-Estimated", "true")
 	writeJSON(w, http.StatusOK, map[string]int{"input_tokens": max(len(body)/4, 1)})
