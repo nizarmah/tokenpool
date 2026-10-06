@@ -88,6 +88,75 @@ that answered.
 | `GET /v1/models` | Both | Model names the config mentions |
 | `GET /healthz` | None | Needs no key |
 
+## `claude-pool`: Claude Code through tokenpool
+
+`claude-pool` is a small shell function that starts Claude Code against
+tokenpool, while plain `claude` keeps your usual login. It has to live in
+your shell: Claude Code ignores `ANTHROPIC_BASE_URL` and
+`ANTHROPIC_AUTH_TOKEN` in a project's `.claude/settings.json` and
+`.claude/settings.local.json`
+([settings reference](https://code.claude.com/docs/en/settings-reference#variables-claude-code-ignores-in-env)).
+
+First save your tokenpool key where only you can read it:
+
+```sh
+install -D -m 600 /dev/null ~/.config/tokenpool/key
+$EDITOR ~/.config/tokenpool/key    # paste your tp- key
+```
+
+Then add the variant that matches your setup to `~/.bashrc` (or
+`~/.bash_aliases`, or `~/.zshrc`) and open a new shell.
+
+**tokenpool on this machine:**
+
+```bash
+claude-pool() {
+  local url=http://127.0.0.1:8080
+  curl -fs -m 3 "$url/healthz" >/dev/null ||
+    { echo "claude-pool: no tokenpool answering at $url" >&2; return 1; }
+  ANTHROPIC_BASE_URL="$url" \
+  ANTHROPIC_AUTH_TOKEN="$(cat ~/.config/tokenpool/key)" \
+    command claude "$@"
+}
+```
+
+**tokenpool on a server, through an SSH tunnel.** Keep tokenpool on the
+server's loopback (`listen: "127.0.0.1:8080"`, or `-p 127.0.0.1:8080:8080`
+in Docker) so only SSH reaches it. This `claude-pool` opens the tunnel the
+first time you run it and leaves it up for later sessions. Set `server` to
+your SSH login:
+
+```bash
+claude-pool() {
+  local server=you@your-server url=http://127.0.0.1:18080
+  if ! curl -fs -m 3 "$url/healthz" >/dev/null; then
+    ssh -f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
+      -L 127.0.0.1:18080:127.0.0.1:8080 "$server" &&
+      curl -fs -m 5 "$url/healthz" >/dev/null ||
+      { echo "claude-pool: can't reach tokenpool through $server" >&2; return 1; }
+  fi
+  ANTHROPIC_BASE_URL="$url" \
+  ANTHROPIC_AUTH_TOKEN="$(cat ~/.config/tokenpool/key)" \
+    command claude "$@"
+}
+```
+
+Close the tunnel with `pkill -f 'L 127.0.0.1:18080:'`; the next
+`claude-pool` opens it again.
+
+**Only in some directories.** To keep `claude-pool` to one project tree,
+put this at the top of the function:
+
+```bash
+  case "$PWD/" in
+    "$HOME/projects/pooled/"*) ;;
+    *) echo "claude-pool: only for ~/projects/pooled" >&2; return 1 ;;
+  esac
+```
+
+Inside a `claude-pool` session, `/status` shows the tokenpool URL as the
+base URL, and tokenpool's log names you as the caller for each request.
+
 ## Configuration
 
 Everything lives in one YAML file (`-config`, default `tokenpool.yaml` or
@@ -249,37 +318,12 @@ to `data/`. Keep `listen: ":8080"` inside the container, and set
 logs JSON.
 
 tokenpool serves plain HTTP, and keys travel in headers. Keep it on
-loopback or a private network, or put a TLS proxy in front. To use a
-loopback-only tokenpool on a server from your laptop, tunnel to it:
-
-```sh
-ssh -N -L 127.0.0.1:18080:127.0.0.1:8080 you@your-server
-export ANTHROPIC_BASE_URL=http://127.0.0.1:18080
-```
+loopback or a private network, or put a TLS proxy in front. To reach a
+loopback-only tokenpool on a server from your laptop, use the SSH-tunnel
+[`claude-pool`](#claude-pool-claude-code-through-tokenpool).
 
 Logs record the caller name, model, upstream, failovers and timing for each
 request, and never keys.
-
-### Claude Code in some directories only
-
-Claude Code ignores `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` in a
-project's `.claude/settings.json` and `.claude/settings.local.json`
-([settings reference](https://code.claude.com/docs/en/settings-reference#variables-claude-code-ignores-in-env)),
-so set them from the shell. This `~/.bashrc` function routes sessions
-started under one directory through tokenpool and leaves the rest alone:
-
-```bash
-claude() {
-  case "$PWD/" in
-    "$HOME/projects/pooled/"*)
-      ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
-      ANTHROPIC_AUTH_TOKEN="$(cat ~/.config/tokenpool/key)" \
-        command claude "$@" ;;
-    *)
-      command claude "$@" ;;
-  esac
-}
-```
 
 ## Use API keys, not subscription tokens
 
