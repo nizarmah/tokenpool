@@ -483,7 +483,9 @@ public API. A login file talks to Grok's CLI chat proxy, which is what the
 For a login file, tokenpool sends the session `key` as
 `Authorization: Bearer` and sets `X-XAI-Token-Auth: xai-grok-cli`. It also
 sets `x-grok-model-override` to the model it actually sends (after `model`
-/ `models`). `auth: grok` forces that even for a token written inline.
+/ `models`), and `x-grok-client-version`: the proxy answers 426 ("Your
+Grok CLI version (none) is outdated") without a recent one. When it raises
+that floor, set the version under the upstream's `headers`. `auth: grok` forces that even for a token written inline.
 `auth: bearer` forces a plain API-key request and does not add the CLI
 headers.
 

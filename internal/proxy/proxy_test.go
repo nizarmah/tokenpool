@@ -345,6 +345,9 @@ func TestGrokAuthFileUsesSessionHeaders(t *testing.T) {
 	if h.Get("X-XAI-Token-Auth") != "xai-grok-cli" {
 		t.Errorf("X-XAI-Token-Auth = %q", h.Get("X-XAI-Token-Auth"))
 	}
+	if h.Get("X-Grok-Client-Version") != GrokClientVersion {
+		t.Errorf("X-Grok-Client-Version = %q", h.Get("X-Grok-Client-Version"))
+	}
 	if h.Get("X-Grok-Model-Override") != "grok-4.5" || grok.calls()[0].body["model"] != "grok-4.5" {
 		t.Errorf("model header %q body %v", h.Get("X-Grok-Model-Override"), grok.calls()[0].body["model"])
 	}
@@ -359,7 +362,8 @@ func TestGrokAPIKeyStaysBearer(t *testing.T) {
 	call(t, "POST", srv.URL+"/v1/chat/completions", "tp-alice-0123456789",
 		`{"model":"grok-4","messages":[{"role":"user","content":"hi"}]}`)
 	h := grok.calls()[0].header
-	if h.Get("Authorization") != "Bearer xai-grok" || h.Get("X-XAI-Token-Auth") != "" || h.Get("X-Grok-Model-Override") != "" {
+	if h.Get("Authorization") != "Bearer xai-grok" || h.Get("X-XAI-Token-Auth") != "" || h.Get("X-Grok-Model-Override") != "" ||
+		h.Get("X-Grok-Client-Version") != "" {
 		t.Errorf("api key headers = %v", h)
 	}
 }

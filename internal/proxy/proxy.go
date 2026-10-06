@@ -385,6 +385,12 @@ func upstreamURL(u config.Upstream, k kind, query string) string {
 	return base + path
 }
 
+// GrokClientVersion is the Grok CLI version sent with a Grok login session.
+// The CLI chat proxy answers 426 ("Your Grok CLI version (none) is
+// outdated") without one; an upstream's headers can override it when the
+// proxy raises its floor.
+var GrokClientVersion = "1.0.46"
+
 func setUpstreamHeaders(h, in http.Header, c pool.Candidate, k kind, cred pool.Credential) {
 	h.Set("Content-Type", "application/json")
 	h.Set("User-Agent", "tokenpool/"+Version)
@@ -422,6 +428,7 @@ func setUpstreamHeaders(h, in http.Header, c pool.Candidate, k kind, cred pool.C
 		// The CLI chat proxy validates a login session with this header,
 		// and routes on x-grok-model-override rather than the body model.
 		h.Set("X-XAI-Token-Auth", "xai-grok-cli")
+		h.Set("X-Grok-Client-Version", GrokClientVersion)
 		if c.UpstreamModel != "" {
 			h.Set("X-Grok-Model-Override", c.UpstreamModel)
 		}
