@@ -49,9 +49,10 @@ upstreams:
     priority: 1
 
   # Another API key, or replace the token with a setup-token
-  # (sk-ant-oat01-..., from `claude setup-token`). The prefix selects
-  # auth: setup-token; set it explicitly to force it. Copy this block again
-  # for each further account.
+  # (sk-ant-oat01-..., from `claude setup-token`). Using a setup-token
+  # here is against Anthropic's terms; do that at your own discretion.
+  # The prefix selects auth: setup-token; set it explicitly to force it.
+  # Copy this block again for each further account.
   - name: claude-api-2
     url: https://api.anthropic.com
     format: anthropic
@@ -71,10 +72,11 @@ upstreams:
       "claude-opus-*": grok-4.7
     model: grok-4.5
 
-  # Or, instead of an API key, the session from `grok login`. Uncomment
-  # this and remove grok-api if that is the credential you want. tokenpool
-  # re-reads the file when `grok` refreshes it. Several logins in one file
-  # need token_field set to the session name.
+  # Or, instead of an API key, the session from `grok login`. Using that
+  # login through tokenpool is against SpaceXAI's terms; do that at your
+  # own discretion. Uncomment this and remove grok-api if that is the
+  # credential you want. tokenpool re-reads the file when `grok` refreshes
+  # it. Several logins in one file need token_field set to the session name.
   # - name: grok-login
   #   url: https://cli-chat-proxy.grok.com/v1
   #   format: openai

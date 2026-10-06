@@ -218,6 +218,12 @@ A Grok login, instead of an API key, is an upstream whose `token_file` is
 `~/.grok/auth.json` (see [Grok](#grok-api-key-or-grok-login)). Mix them
 freely: three setup-tokens and one API key is a normal pool.
 
+Using a setup-token or a Grok login this way is against that provider's
+terms of use. Use either at your own discretion. A Console API key or an
+xAI API key is the credential those terms allow. Details are under
+[Anthropic](#anthropic-api-keys-and-setup-tokens) and
+[Grok](#grok-api-key-or-grok-login).
+
 | field        | meaning |
 |--------------|---------|
 | `name`       | Identifier for logs, headers and the admin API. Letters, digits, `.`, `_` or `-`. |
@@ -428,10 +434,14 @@ and `x-stainless-*`). It does not fill those in itself. Point Claude Code at
 tokenpool with [`claude-pool`](#claude-pool-claude-code-through-tokenpool) so
 the request is a Claude Code request and only the credential is swapped.
 
-Anthropic's terms reserve a setup-token for that subscriber's own use of
-Claude Code
-([Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)).
-A Console API key is the credential to use for any other caller.
+Using a setup-token through tokenpool is against
+[Anthropic's terms](https://code.claude.com/docs/en/legal-and-compliance).
+OAuth tokens from `claude setup-token` are only for that subscriber's own
+use of Claude Code and Anthropic's other apps. Anthropic does not permit
+storing those tokens or routing other requests through a Free, Pro, or Max
+credential, and may enforce that without notice. Use one here at your own
+discretion. A Console API key is the credential those terms allow for any
+other caller.
 
 ## Grok: API key or Grok login
 
@@ -486,6 +496,13 @@ A file with more than one login needs `token_field` set to the session
 name, the object's top-level key (`tokenpool -check` names them). Two
 logins are two upstreams, each naming one session. Most models on the CLI
 proxy only stream; Claude Code already streams.
+
+Using a Grok login through tokenpool is against
+[SpaceXAI's terms of service](https://x.ai/legal/terms-of-service).
+`~/.grok/auth.json` is an account credential, and those terms say not to
+share account credentials or make the account available to anyone else.
+The developer API, which an `xai-...` key calls, is a separate agreement.
+Use a login file here at your own discretion.
 
 ## Contributing
 
