@@ -42,13 +42,32 @@ type Upstream struct {
 	lastUsed      time.Time
 }
 
+// Credential is the secret to send upstream.
+type Credential struct {
+	Token string
+	// GrokSession is true when Token was read from a Grok ~/.grok/auth.json,
+	// which the CLI chat proxy accepts as a bearer session rather than an API key.
+	GrokSession bool
+}
+
+// Credential returns the token to send upstream, reading token_file when
+// the upstream has one.
+func (u *Upstream) Credential() (Credential, error) {
+	if u.fileTok == nil {
+		return Credential{Token: u.Token}, nil
+	}
+	token, grok, err := u.fileTok.get()
+	if err != nil {
+		return Credential{}, err
+	}
+	return Credential{Token: token, GrokSession: grok}, nil
+}
+
 // AuthToken returns the token to send upstream, reading token_file when
 // the upstream has one.
 func (u *Upstream) AuthToken() (string, error) {
-	if u.fileTok == nil {
-		return u.Token, nil
-	}
-	return u.fileTok.get()
+	cred, err := u.Credential()
+	return cred.Token, err
 }
 
 // Candidate is an upstream chosen for a request, with the model to send it.
@@ -294,10 +313,21 @@ func (p *Pool) Get(name string) (Status, error) {
 	return p.status(u), nil
 }
 
+// statusAuth reports the auth style, including a Grok login file whose
+// token is not known until the file is read.
+func (u *Upstream) statusAuth() string {
+	if u.Auth == "" && u.Format == config.OpenAI && u.fileTok != nil {
+		if cred, err := u.Credential(); err == nil && cred.GrokSession {
+			return "grok"
+		}
+	}
+	return u.AuthStyle()
+}
+
 func (p *Pool) status(u *Upstream) Status {
 	now := p.now()
 	s := Status{
-		Name: u.Name, URL: u.raw.URL, Format: u.Format, Auth: u.AuthStyle(),
+		Name: u.Name, URL: u.raw.URL, Format: u.Format, Auth: u.statusAuth(),
 		Token: redact(u.Token), TokenFile: u.TokenFile, Model: u.Model, Models: u.Models, MaxTokens: u.MaxTokens,
 		Priority: u.Priority, Fallback: u.Fallback, Source: "api", State: "available",
 		LastStatus: u.lastStatus, Requests: u.requests, Failures: u.failures,

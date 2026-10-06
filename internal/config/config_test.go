@@ -66,6 +66,85 @@ upstreams:
 	}
 }
 
+func TestAnthropicCredentialChoice(t *testing.T) {
+	api, err := Parse([]byte(`
+allow_anonymous: true
+upstreams:
+  - {name: api, url: https://api.anthropic.com, format: anthropic, token: sk-ant-api03-example}
+  - {name: sub, url: https://api.anthropic.com, format: anthropic, token: sk-ant-oat01-example}
+  - {name: forced, url: https://api.anthropic.com, format: anthropic, token: sk-ant-oat01-example, auth: x-api-key}
+  - {name: explicit, url: https://api.anthropic.com, format: anthropic, token: refreshed-later, auth: setup-token}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := api.Upstreams[0].AuthStyle(); got != "x-api-key" {
+		t.Errorf("api key auth = %q", got)
+	}
+	if got := api.Upstreams[1].AuthStyle(); got != "setup-token" {
+		t.Errorf("setup-token prefix auth = %q", got)
+	}
+	if got := api.Upstreams[2].AuthStyle(); got != "x-api-key" {
+		t.Errorf("explicit x-api-key = %q", got)
+	}
+	if got := api.Upstreams[3].AuthFor("from-file"); got != "setup-token" {
+		t.Errorf("explicit setup-token = %q", got)
+	}
+	fileToken := configUpstreamAuth(t, `
+allow_anonymous: true
+upstreams:
+  - {name: file, url: https://api.anthropic.com, format: anthropic, token_file: /tmp/tok}
+`)
+	if got := fileToken.AuthFor("sk-ant-oat01-from-file"); got != "setup-token" {
+		t.Errorf("token_file setup-token auth = %q", got)
+	}
+	if got := fileToken.AuthFor("sk-ant-api03-from-file"); got != "x-api-key" {
+		t.Errorf("token_file api key auth = %q", got)
+	}
+	if _, err := Parse([]byte(`allow_anonymous: true
+upstreams:
+  - {name: a, url: https://api.x.ai/v1, format: openai, auth: setup-token}`)); err == nil {
+		t.Error("setup-token on an openai upstream was accepted")
+	}
+	if _, err := Parse([]byte(`allow_anonymous: true
+upstreams:
+  - {name: a, url: https://api.anthropic.com, format: anthropic, auth: grok}`)); err == nil {
+		t.Error("grok auth on an anthropic upstream was accepted")
+	}
+}
+
+func TestTokenFileTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tokenpool.yaml")
+	writeFile(t, path, `
+allow_anonymous: true
+upstreams:
+  - name: grok
+    url: https://cli-chat-proxy.grok.com/v1
+    format: openai
+    token_file: ~/.grok/auth.json
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, ".grok", "auth.json")
+	if cfg.Upstreams[0].TokenFile != want {
+		t.Errorf("token_file = %q, want %q", cfg.Upstreams[0].TokenFile, want)
+	}
+}
+
+func configUpstreamAuth(t *testing.T, doc string) Upstream {
+	t.Helper()
+	cfg, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg.Upstreams[0]
+}
+
 func TestParseErrors(t *testing.T) {
 	tests := map[string]string{
 		"no client keys":       `upstreams: []`,
@@ -175,7 +254,7 @@ func TestExampleConfigParses(t *testing.T) {
 	for _, u := range cfg.Upstreams {
 		got = append(got, fmt.Sprintf("%s/%d/%v", u.Name, u.Priority, u.Fallback))
 	}
-	if want := "claude-primary/1/false claude-secondary/2/false grok/3/true"; strings.Join(got, " ") != want {
+	if want := "claude-api-1/1/false claude-api-2/2/false grok-api/3/true"; strings.Join(got, " ") != want {
 		t.Errorf("example upstreams = %v, want %s", got, want)
 	}
 }

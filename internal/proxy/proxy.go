@@ -328,7 +328,7 @@ func (s *Server) send(r *http.Request, k kind, c pool.Candidate, body []byte) (*
 	if err != nil {
 		return nil, badRequestError{err}
 	}
-	token, err := c.AuthToken()
+	cred, err := c.Credential()
 	if err != nil {
 		return nil, tokenError{err}
 	}
@@ -341,7 +341,7 @@ func (s *Server) send(r *http.Request, k kind, c pool.Candidate, body []byte) (*
 	if err != nil {
 		return nil, err
 	}
-	setUpstreamHeaders(req.Header, r.Header, c, k, token)
+	setUpstreamHeaders(req.Header, r.Header, c, k, cred)
 	return s.client.Do(req)
 }
 
@@ -385,9 +385,13 @@ func upstreamURL(u config.Upstream, k kind, query string) string {
 	return base + path
 }
 
-func setUpstreamHeaders(h, in http.Header, c pool.Candidate, k kind, token string) {
+func setUpstreamHeaders(h, in http.Header, c pool.Candidate, k kind, cred pool.Credential) {
 	h.Set("Content-Type", "application/json")
 	h.Set("User-Agent", "tokenpool/"+Version)
+	auth := c.AuthFor(cred.Token)
+	if c.Auth == "" && c.Format == config.OpenAI && cred.GrokSession {
+		auth = "grok"
+	}
 	if c.Format == config.Anthropic {
 		version := "2023-06-01"
 		if k.format() == config.Anthropic {
@@ -400,16 +404,76 @@ func setUpstreamHeaders(h, in http.Header, c pool.Candidate, k kind, token strin
 		}
 		h.Set("Anthropic-Version", version)
 	}
-	switch auth := c.AuthStyle(); {
-	case auth == "bearer":
-		h.Set("Authorization", "Bearer "+token)
+	switch {
+	case auth == "bearer" || auth == "setup-token" || auth == "grok":
+		h.Set("Authorization", "Bearer "+cred.Token)
 	case auth == "x-api-key":
-		h.Set("X-Api-Key", token)
+		h.Set("X-Api-Key", cred.Token)
 	case strings.HasPrefix(auth, "header:"):
-		h.Set(strings.TrimPrefix(auth, "header:"), token)
+		h.Set(strings.TrimPrefix(auth, "header:"), cred.Token)
+	}
+	if auth == "setup-token" {
+		// The caller is Claude Code. Keep the identity it actually sent
+		// and attach the OAuth beta the setup-token requires.
+		forwardClientIdentity(h, in)
+		mergeBeta(h, config.OAuthBeta())
+	}
+	if auth == "grok" {
+		// The CLI chat proxy validates a login session with this header,
+		// and routes on x-grok-model-override rather than the body model.
+		h.Set("X-XAI-Token-Auth", "xai-grok-cli")
+		if c.UpstreamModel != "" {
+			h.Set("X-Grok-Model-Override", c.UpstreamModel)
+		}
 	}
 	for name, value := range c.Headers {
 		h.Set(name, value)
+	}
+	if auth == "setup-token" {
+		mergeBeta(h, config.OAuthBeta())
+	}
+}
+
+// forwardClientIdentity copies the Claude Code identity headers the client
+// sent. It does not invent any. Authorization and x-api-key stay out: those
+// carry the caller's tokenpool key.
+func forwardClientIdentity(h, in http.Header) {
+	if ua := in.Get("User-Agent"); ua != "" {
+		h.Set("User-Agent", ua)
+	}
+	for _, name := range []string{"X-App", "Anthropic-Dangerous-Direct-Browser-Access"} {
+		if v := in.Get(name); v != "" {
+			h.Set(name, v)
+		}
+	}
+	for name, values := range in {
+		if strings.HasPrefix(strings.ToLower(name), "x-stainless-") && len(values) > 0 {
+			h.Set(name, values[0])
+		}
+	}
+}
+
+// mergeBeta adds beta to anthropic-beta if it is not already listed.
+func mergeBeta(h http.Header, beta string) {
+	var parts []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		parts = append(parts, s)
+	}
+	for _, v := range h.Values("Anthropic-Beta") {
+		for _, p := range strings.Split(v, ",") {
+			add(p)
+		}
+	}
+	add(beta)
+	h.Del("Anthropic-Beta")
+	if len(parts) > 0 {
+		h.Set("Anthropic-Beta", strings.Join(parts, ","))
 	}
 }
 

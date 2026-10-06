@@ -44,8 +44,10 @@ type Upstream struct {
 	// such as "tokens.access_token". Without it, tokenpool looks for a
 	// top-level access_token, accessToken or token.
 	TokenField string `yaml:"token_field,omitempty" json:"token_field,omitempty"`
-	// Auth says how the token is sent: bearer, x-api-key, header:<Name> or none.
-	// Defaults to x-api-key for anthropic and bearer for openai.
+	// Auth says how the token is sent: x-api-key, bearer, setup-token, grok,
+	// header:<Name> or none. Defaults to x-api-key for an Anthropic API key,
+	// setup-token for a Claude Code setup-token (sk-ant-oat…), grok when
+	// token_file is a Grok ~/.grok/auth.json, and bearer otherwise.
 	Auth string `yaml:"auth,omitempty" json:"auth,omitempty"`
 	// Model, when set, replaces the requested model for every request.
 	// With Models set, it covers models that match no pattern.
@@ -284,9 +286,17 @@ func (u Upstream) Validate() error {
 	}
 	switch auth := u.AuthStyle(); {
 	case auth == "bearer", auth == "x-api-key", auth == "none":
+	case auth == "setup-token":
+		if u.Format != Anthropic {
+			return fmt.Errorf("upstream %q: auth setup-token is only for anthropic upstreams", u.Name)
+		}
+	case auth == "grok":
+		if u.Format != OpenAI {
+			return fmt.Errorf("upstream %q: auth grok is only for openai upstreams", u.Name)
+		}
 	case strings.HasPrefix(auth, "header:") && len(auth) > len("header:"):
 	default:
-		return fmt.Errorf("upstream %q: auth must be bearer, x-api-key, header:<Name> or none, got %q", u.Name, auth)
+		return fmt.Errorf("upstream %q: auth must be x-api-key, bearer, setup-token, grok, header:<Name> or none, got %q", u.Name, auth)
 	}
 	if u.MaxTokens < 0 {
 		return fmt.Errorf("upstream %q: max_tokens must not be negative", u.Name)
@@ -294,10 +304,34 @@ func (u Upstream) Validate() error {
 	return nil
 }
 
-// AuthStyle returns how the token is sent, applying the per-format default.
+// oauthBeta is the Anthropic beta an OAuth setup-token has to be sent with.
+const oauthBeta = "oauth-2025-04-20"
+
+// OAuthBeta is the anthropic-beta value a setup-token requires.
+func OAuthBeta() string { return oauthBeta }
+
+// SetupToken reports whether token is a Claude Code setup-token
+// (sk-ant-oat…), as printed by `claude setup-token`.
+func SetupToken(token string) bool {
+	return strings.HasPrefix(strings.TrimSpace(token), "sk-ant-oat")
+}
+
+// AuthStyle returns how the configured token is sent, applying the default
+// when auth is empty. A token read later from token_file is not visible
+// here; use AuthFor for the credential actually sent.
 func (u Upstream) AuthStyle() string {
+	return u.AuthFor(u.Token)
+}
+
+// AuthFor returns how token is sent. An explicit auth wins. Otherwise an
+// Anthropic sk-ant-oat token uses setup-token, any other Anthropic token
+// uses x-api-key, and OpenAI uses bearer.
+func (u Upstream) AuthFor(token string) string {
 	if u.Auth != "" {
 		return u.Auth
+	}
+	if u.Format == Anthropic && SetupToken(token) {
+		return "setup-token"
 	}
 	if u.Format == Anthropic {
 		return "x-api-key"
@@ -316,6 +350,9 @@ func (u Upstream) Resolve() (Upstream, error) {
 	}
 	if u.TokenFile, err = Expand(u.TokenFile); err != nil {
 		return u, fmt.Errorf("token_file: %w", err)
+	}
+	if u.TokenFile, err = expandHome(u.TokenFile); err != nil {
+		return u, err
 	}
 	if len(u.Headers) > 0 {
 		headers := make(map[string]string, len(u.Headers))
@@ -389,6 +426,21 @@ func Glob(pattern, s string) bool {
 }
 
 var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandHome replaces a leading ~ with the current user's home directory.
+func expandHome(path string) (string, error) {
+	if path != "~" && !strings.HasPrefix(path, "~/") && !strings.HasPrefix(path, `~\`) {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("token_file %q: %w", path, err)
+	}
+	if path == "~" {
+		return home, nil
+	}
+	return filepath.Join(home, path[2:]), nil
+}
 
 // Expand replaces ${NAME} with the environment variable NAME. A reference
 // to an unset variable is an error, so a missing secret never goes out empty.

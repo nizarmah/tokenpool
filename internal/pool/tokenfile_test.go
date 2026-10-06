@@ -30,7 +30,7 @@ func TestParseTokenFile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseTokenFile([]byte(tt.data), tt.field)
+			got, grok, err := ParseTokenFile([]byte(tt.data), tt.field)
 			if tt.err != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.err) {
 					t.Fatalf("err = %v, want %q", err, tt.err)
@@ -40,10 +40,37 @@ func TestParseTokenFile(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || got != tt.want {
-				t.Fatalf("got %q, %v; want %q", got, err, tt.want)
+			if err != nil || got != tt.want || grok {
+				t.Fatalf("got %q grok %v, %v; want %q", got, grok, err, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseGrokAuthJSON(t *testing.T) {
+	one := `{"https://auth.x.ai::client":{"key":"eyJ-session","auth_mode":"oidc","refresh_token":"r"}}`
+	got, grok, err := ParseTokenFile([]byte(one), "")
+	if err != nil || !grok || got != "eyJ-session" {
+		t.Fatalf("got %q grok %v err %v", got, grok, err)
+	}
+
+	two := `{
+	  "https://auth.x.ai::a": {"key":"secret-a","auth_mode":"oidc"},
+	  "https://auth.x.ai::b": {"key":"secret-b","auth_mode":"oidc"}
+	}`
+	_, _, err = ParseTokenFile([]byte(two), "")
+	if err == nil || !strings.Contains(err.Error(), "https://auth.x.ai::a") || strings.Contains(err.Error(), "secret-") {
+		t.Fatalf("err = %v", err)
+	}
+	got, grok, err = ParseTokenFile([]byte(two), "https://auth.x.ai::b")
+	if err != nil || !grok || got != "secret-b" {
+		t.Fatalf("selected %q grok %v err %v", got, grok, err)
+	}
+
+	// A normal token file with a nested object named key is not a Grok login.
+	got, grok, err = ParseTokenFile([]byte(`{"access_token":"a1","extra":{"key":"nope"}}`), "")
+	if err != nil || grok || got != "a1" {
+		t.Fatalf("access_token got %q grok %v err %v", got, grok, err)
 	}
 }
 

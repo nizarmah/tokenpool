@@ -15,8 +15,10 @@ and never sees the switch.
                              └──────► grok              (fallback)
 ```
 
-- **Any URL, any key.** Each upstream is a URL, a key, the API it speaks
-  (`anthropic` or `openai`) and how it wants the key sent.
+- **Any URL, any credential.** Each upstream is one credential: a Claude
+  Console API key, a Claude Code setup-token, a Grok API key, or a Grok
+  login. List as many as you have. The API it speaks is `anthropic` or
+  `openai`.
 - **Both APIs on the front.** Clients call `POST /v1/messages` (Anthropic)
   or `POST /v1/chat/completions` (OpenAI). When the upstream speaks the
   other API, tokenpool translates the request, the response and the stream,
@@ -167,45 +169,64 @@ an unset variable stops startup. See
 
 ### The pool
 
+Each entry is one credential. Add every key you want in the pool. The
+example below is two Claude Console API keys, then a third Claude account
+that is a setup-token, then a Grok API key held in reserve. A pool of only
+setup-tokens, or only API keys, is the same shape with the other entries
+left out. Same `priority` plus `strategy: round_robin` spreads load across
+those entries instead of emptying the first one.
+
 ```yaml
 upstreams:
-  - name: claude-primary
+  - name: claude-api-1
     url: https://api.anthropic.com
     format: anthropic
-    token: sk-ant-api03-...
+    token: sk-ant-api03-...       # Console API key
     priority: 1
 
-  - name: claude-secondary
+  - name: claude-api-2
     url: https://api.anthropic.com
     format: anthropic
-    token: sk-ant-api03-...
+    token: sk-ant-api03-...       # another Console API key
     priority: 2
 
-  - name: grok
+  - name: claude-setup-1
+    url: https://api.anthropic.com
+    format: anthropic
+    token: sk-ant-oat01-...       # claude setup-token; the prefix selects it
+    priority: 3
+
+  - name: grok-api
     url: https://api.x.ai/v1
     format: openai
-    token: xai-...
+    token: xai-...                # console.x.ai API key
     fallback: true
-    priority: 3
+    priority: 4
     models:
       "claude-opus-*": grok-4.7
     model: grok-4.5
 ```
 
-Requests go to `claude-primary`, then `claude-secondary` when it's
-limited, then `grok` once both are. When a Claude key's limit resets,
-traffic returns to it. Opus requests run on `grok-4.7` and everything else
-on `grok-4.5`.
+Requests go to `claude-api-1`, then `claude-api-2`, then `claude-setup-1`,
+and `grok-api` only once every non-fallback upstream is limited or down.
+When an earlier credential's limit resets, traffic returns to it. Opus
+requests that reach Grok run on `grok-4.7` and everything else on
+`grok-4.5`.
+
+A second setup-token is another upstream with its own `sk-ant-oat01-...`.
+A Grok login, instead of an API key, is an upstream whose `token_file` is
+`~/.grok/auth.json` (see [Grok](#grok-api-key-or-grok-login)). Mix them
+freely: three setup-tokens and one API key is a normal pool.
 
 | field        | meaning |
 |--------------|---------|
 | `name`       | Identifier for logs, headers and the admin API. Letters, digits, `.`, `_` or `-`. |
 | `url`        | API base. `anthropic`: like the Anthropic SDK, no `/v1` (`https://api.anthropic.com`). `openai`: like the OpenAI SDK, with `/v1` (`https://api.x.ai/v1`); a bare host gets `/v1`. A URL that already ends in `/v1/messages` or `/chat/completions` is used as is. |
 | `format`     | `anthropic` (Messages API) or `openai` (Chat Completions). |
-| `token`      | The upstream's API key. |
-| `token_file` | Read the key from this file instead, re-read whenever the file changes. See [Keys from a file](#keys-from-a-file). |
-| `token_field` | Dot path to the key inside a JSON `token_file`, such as `tokens.access_token`. |
-| `auth`       | `x-api-key` (default for anthropic), `bearer` (default for openai), `header:<Name>`, or `none`. |
+| `token`      | The upstream credential: an API key, a Claude Code setup-token, or a Grok session token. |
+| `token_file` | Read the credential from this file instead, re-read whenever the file changes. `~` is your home directory. See [Keys from a file](#keys-from-a-file). |
+| `token_field` | Dot path to the credential inside a JSON `token_file`, such as `tokens.access_token`. For a Grok `auth.json` with several logins, the session name instead. |
+| `auth`       | `x-api-key` (default for an Anthropic API key), `setup-token` (default for a `sk-ant-oat` token), `grok` (default for a Grok `auth.json`), `bearer` (default for other OpenAI-format upstreams), `header:<Name>`, or `none`. |
 | `model`      | Replaces the requested model. With `models` set, it covers models that match no pattern. |
 | `models`     | Requested model to upstream model. `*` is a wildcard and the most specific pattern wins. An empty value passes the model through. With `models` set and no `model`, the upstream only serves models that match. |
 | `max_tokens` | Caps `max_tokens` for this upstream. |
@@ -231,9 +252,11 @@ it instead of writing `token`:
 tokenpool checks the file on every request and re-reads it when it
 changes, so a refreshed token is used right away. A file holding just the
 token works as is. For JSON, tokenpool uses `token_field`, or else a
-top-level `access_token`, `accessToken` or `token`. It refuses to start
-when the file can't be read or parsed. Later read errors bench the
-upstream like any other failure, and error messages never quote the file.
+top-level `access_token`, `accessToken` or `token`. A Grok
+`~/.grok/auth.json` is recognized on its own: tokenpool reads the
+session's `key`. It refuses to start when the file can't be read or
+parsed. Later read errors bench the upstream like any other failure, and
+error messages never quote the file.
 
 `token_file` can only be set in the config file. The admin API rejects
 it, because an admin-added upstream could otherwise send any file on the
@@ -357,16 +380,112 @@ loopback-only tokenpool on a server from your laptop, use the SSH-tunnel
 Logs record the caller name, model, upstream, failovers and timing for each
 request, and never keys.
 
-## Use API keys, not subscription tokens
+## Anthropic: API keys and setup-tokens
 
-Use a Claude Console API key (`sk-ant-api...`) for Claude upstreams, not a
-subscription token from `claude setup-token`. Anthropic's terms reserve
-Free/Pro/Max OAuth tokens for the subscriber's own use of Claude Code and
-Anthropic's apps. Routing other people's requests through one isn't
-allowed, and Anthropic may cut off the account
+An Anthropic upstream takes either kind of credential, and the pool can
+hold any number of each. Leave `auth` unset and the token decides, or set
+it. Two API keys and two setup-tokens are four upstreams:
+
+```yaml
+  - name: claude-api-1
+    url: https://api.anthropic.com
+    format: anthropic
+    token: sk-ant-api03-...
+    priority: 1
+
+  - name: claude-api-2
+    url: https://api.anthropic.com
+    format: anthropic
+    token: sk-ant-api03-...
+    priority: 1          # same priority: round_robin shares these two
+
+  - name: claude-setup-1
+    url: https://api.anthropic.com
+    format: anthropic
+    token: sk-ant-oat01-...    # from: claude setup-token
+    priority: 2
+
+  - name: claude-setup-2
+    url: https://api.anthropic.com
+    format: anthropic
+    token: sk-ant-oat01-...
+    auth: setup-token          # optional; the sk-ant-oat prefix selects this
+    priority: 2
+```
+
+| Credential | `auth` | How it is sent |
+| --- | --- | --- |
+| Console API key, `sk-ant-api03-...` | `x-api-key` (the default) | `x-api-key` |
+| Setup-token from `claude setup-token`, `sk-ant-oat01-...` | `setup-token` (the default for this prefix) | `Authorization: Bearer`, plus `oauth-2025-04-20` on `anthropic-beta` |
+
+`auth: x-api-key` forces the API-key header even when the token starts with
+`sk-ant-oat`. `auth: setup-token` forces bearer auth for a token that does
+not have that prefix, including one read from `token_file`.
+
+For a setup-token, tokenpool also forwards the identity headers the client
+actually sent (`User-Agent`, `x-app`, `anthropic-dangerous-direct-browser-access`,
+and `x-stainless-*`). It does not fill those in itself. Point Claude Code at
+tokenpool with [`claude-pool`](#claude-pool-claude-code-through-tokenpool) so
+the request is a Claude Code request and only the credential is swapped.
+
+Anthropic's terms reserve a setup-token for that subscriber's own use of
+Claude Code
 ([Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)).
-API keys that your organization provisions for its own staff are fine.
-Check every other provider's terms the same way.
+A Console API key is the credential to use for any other caller.
+
+## Grok: API key or Grok login
+
+A Grok upstream takes either an API key from
+[console.x.ai](https://console.x.ai) or the session `grok login` stores in
+`~/.grok/auth.json`. Use one, or several of each. An API key talks to the
+public API. A login file talks to Grok's CLI chat proxy, which is what the
+`grok` command itself calls.
+
+```yaml
+  - name: grok-api-1
+    url: https://api.x.ai/v1
+    format: openai
+    token: xai-...
+    priority: 1
+    models:
+      "claude-*": grok-4.5
+
+  - name: grok-api-2
+    url: https://api.x.ai/v1
+    format: openai
+    token: xai-...
+    priority: 2
+    model: grok-4.5
+
+  - name: grok-login
+    url: https://cli-chat-proxy.grok.com/v1
+    format: openai
+    token_file: ~/.grok/auth.json   # written by `grok login`
+    priority: 3
+    model: grok-4.5
+```
+
+| Credential | `auth` | Where it goes |
+| --- | --- | --- |
+| API key, `xai-...` | `bearer` (the default) | `https://api.x.ai/v1`, as `Authorization: Bearer` |
+| `~/.grok/auth.json` | `grok` (the default when the file is a Grok login) | `https://cli-chat-proxy.grok.com/v1` |
+
+For a login file, tokenpool sends the session `key` as
+`Authorization: Bearer` and sets `X-XAI-Token-Auth: xai-grok-cli`. It also
+sets `x-grok-model-override` to the model it actually sends (after `model`
+/ `models`). `auth: grok` forces that even for a token written inline.
+`auth: bearer` forces a plain API-key request and does not add the CLI
+headers.
+
+`grok login` keeps `auth.json` fresh. tokenpool does not refresh the
+session itself; it re-reads the file when it changes. In Docker, mount the
+directory that contains `auth.json`, not the file: `grok login` replaces
+it (see [Keys from a file](#keys-from-a-file)).
+
+A file with more than one login needs `token_field` set to the session
+name, the object's top-level key (`tokenpool -check` names them). Two
+logins are two upstreams, each naming one session. Most models on the CLI
+proxy only stream; Claude Code already streams.
 
 ## Contributing
 

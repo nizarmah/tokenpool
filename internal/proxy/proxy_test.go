@@ -286,6 +286,107 @@ func TestTokenFileIsReadPerRequest(t *testing.T) {
 	}
 }
 
+func TestSetupTokenIsBearerWithOAuthBeta(t *testing.T) {
+	claude := newFake(t, claudeMessage)
+	srv, _ := newProxy(t, poolYAML("", fmt.Sprintf(`
+  - name: claude
+    url: %q
+    format: anthropic
+    token: sk-ant-oat01-example
+`, claude.URL)), "")
+	res, body := call(t, "POST", srv.URL+"/v1/messages", "tp-alice-0123456789", messagesBody,
+		"User-Agent", "claude-cli/2.1.0 (external, cli)",
+		"Anthropic-Beta", "claude-code-20250219",
+		"X-App", "cli",
+		"X-Stainless-Lang", "js",
+		"Anthropic-Dangerous-Direct-Browser-Access", "true")
+	if res.StatusCode != 200 {
+		t.Fatalf("status %d: %s", res.StatusCode, body)
+	}
+	h := claude.calls()[0].header
+	if h.Get("Authorization") != "Bearer sk-ant-oat01-example" || h.Get("X-Api-Key") != "" {
+		t.Errorf("auth headers = %v", h)
+	}
+	if strings.Contains(fmt.Sprint(h), "tp-alice-0123456789") {
+		t.Error("client key leaked upstream")
+	}
+	beta := h.Get("Anthropic-Beta")
+	if !strings.Contains(beta, "oauth-2025-04-20") || !strings.Contains(beta, "claude-code-20250219") {
+		t.Errorf("beta = %q", beta)
+	}
+	if h.Get("User-Agent") != "claude-cli/2.1.0 (external, cli)" || h.Get("X-App") != "cli" ||
+		h.Get("X-Stainless-Lang") != "js" || h.Get("Anthropic-Dangerous-Direct-Browser-Access") != "true" {
+		t.Errorf("identity headers = %v", h)
+	}
+}
+
+func TestGrokAuthFileUsesSessionHeaders(t *testing.T) {
+	grok := newFake(t, grokStream)
+	file := filepath.Join(t.TempDir(), "auth.json")
+	body := `{"https://auth.x.ai::client":{"key":"eyJ-session","auth_mode":"oidc","refresh_token":"r"}}`
+	if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, p := newProxy(t, poolYAML("", fmt.Sprintf(`
+  - name: grok-login
+    url: %q
+    format: openai
+    token_file: %q
+    model: grok-4.5
+`, grok.URL+"/v1", file)), "")
+	res, raw := call(t, "POST", srv.URL+"/v1/messages", "tp-alice-0123456789", messagesBody)
+	if res.StatusCode != 200 || res.Header.Get("X-Tokenpool-Upstream") != "grok-login" {
+		t.Fatalf("status %d upstream %q body %s", res.StatusCode, res.Header.Get("X-Tokenpool-Upstream"), raw)
+	}
+	h := grok.calls()[0].header
+	if h.Get("Authorization") != "Bearer eyJ-session" || h.Get("X-Api-Key") != "" {
+		t.Errorf("auth = %v", h)
+	}
+	if h.Get("X-XAI-Token-Auth") != "xai-grok-cli" {
+		t.Errorf("X-XAI-Token-Auth = %q", h.Get("X-XAI-Token-Auth"))
+	}
+	if h.Get("X-Grok-Model-Override") != "grok-4.5" || grok.calls()[0].body["model"] != "grok-4.5" {
+		t.Errorf("model header %q body %v", h.Get("X-Grok-Model-Override"), grok.calls()[0].body["model"])
+	}
+	if st, _ := p.Get("grok-login"); st.Auth != "grok" {
+		t.Errorf("status auth = %q", st.Auth)
+	}
+}
+
+func TestGrokAPIKeyStaysBearer(t *testing.T) {
+	grok := newFake(t, grokStream)
+	srv, _ := newProxy(t, poolYAML("", grokUp(grok.URL)), "")
+	call(t, "POST", srv.URL+"/v1/chat/completions", "tp-alice-0123456789",
+		`{"model":"grok-4","messages":[{"role":"user","content":"hi"}]}`)
+	h := grok.calls()[0].header
+	if h.Get("Authorization") != "Bearer xai-grok" || h.Get("X-XAI-Token-Auth") != "" || h.Get("X-Grok-Model-Override") != "" {
+		t.Errorf("api key headers = %v", h)
+	}
+}
+
+func TestExplicitAPIKeyIgnoresSetupTokenPrefix(t *testing.T) {
+	claude := newFake(t, claudeMessage)
+	srv, _ := newProxy(t, poolYAML("", fmt.Sprintf(`
+  - name: claude
+    url: %q
+    format: anthropic
+    token: sk-ant-oat01-example
+    auth: x-api-key
+`, claude.URL)), "")
+	call(t, "POST", srv.URL+"/v1/messages", "tp-alice-0123456789", messagesBody,
+		"User-Agent", "claude-cli/2.1.0")
+	h := claude.calls()[0].header
+	if h.Get("X-Api-Key") != "sk-ant-oat01-example" || h.Get("Authorization") != "" {
+		t.Errorf("headers = %v", h)
+	}
+	if strings.Contains(h.Get("Anthropic-Beta"), "oauth-2025-04-20") {
+		t.Errorf("api-key mode added oauth beta: %q", h.Get("Anthropic-Beta"))
+	}
+	if h.Get("User-Agent") == "claude-cli/2.1.0" {
+		t.Errorf("api-key mode forwarded the client user agent: %q", h.Get("User-Agent"))
+	}
+}
+
 func TestPassthroughKeepsTheRequestIntact(t *testing.T) {
 	claude := newFake(t, claudeMessage)
 	srv, _ := newProxy(t, poolYAML("", claudeUp(claude.URL)), "")

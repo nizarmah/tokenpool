@@ -34,25 +34,32 @@ cooldowns:
   quota: 1h         # 402, or "credit balance too low" / "quota exceeded"
   max: 24h          # upper bound on any cooldown
 
-# The pool. Requests go to the lowest priority first and move down the
-# list as upstreams hit their limits. An upstream with `fallback: true`
-# only takes traffic once every other upstream is limited or failing.
+# The pool. Each entry is one credential. Add as many as you have: several
+# Console API keys, several `claude setup-token`s, several Grok API keys,
+# a Grok login, or any mix. Requests go to the lowest priority first.
+# An upstream with `fallback: true` only takes traffic once every other
+# upstream is limited or failing.
 # format is the API the upstream speaks: anthropic (Messages API) or
 # openai (Chat Completions); tokenpool translates between them.
 upstreams:
-  - name: claude-primary
+  - name: claude-api-1
     url: https://api.anthropic.com
     format: anthropic
     token: "<Anthropic API key, sk-ant-api03-...>"
     priority: 1
 
-  - name: claude-secondary
+  # Another API key, or replace the token with a setup-token
+  # (sk-ant-oat01-..., from `claude setup-token`). The prefix selects
+  # auth: setup-token; set it explicitly to force it. Copy this block again
+  # for each further account.
+  - name: claude-api-2
     url: https://api.anthropic.com
     format: anthropic
-    token: "<another Anthropic API key>"
+    token: "<another Anthropic API key, or a claude setup-token>"
+    # auth: setup-token
     priority: 2
 
-  - name: grok
+  - name: grok-api
     url: https://api.x.ai/v1
     format: openai
     token: "<xAI API key, xai-...>"
@@ -63,3 +70,15 @@ upstreams:
     models:
       "claude-opus-*": grok-4.7
     model: grok-4.5
+
+  # Or, instead of an API key, the session from `grok login`. Uncomment
+  # this and remove grok-api if that is the credential you want. tokenpool
+  # re-reads the file when `grok` refreshes it. Several logins in one file
+  # need token_field set to the session name.
+  # - name: grok-login
+  #   url: https://cli-chat-proxy.grok.com/v1
+  #   format: openai
+  #   token_file: ~/.grok/auth.json
+  #   fallback: true
+  #   priority: 3
+  #   model: grok-4.5
