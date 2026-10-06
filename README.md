@@ -39,7 +39,19 @@ One static binary, one YAML file, no database.
 
 ## Install
 
-With Go 1.23 or newer:
+Download the archive for your platform from
+[Releases](https://github.com/nizarmah/tokenpool/releases/latest)
+(Linux, macOS and Windows, amd64 and arm64), check it against
+`checksums.txt`, and put `tokenpool` on your `PATH`:
+
+```sh
+os=linux arch=amd64   # or darwin / arm64
+curl -fsSLO "https://github.com/nizarmah/tokenpool/releases/latest/download/tokenpool_${os}_${arch}.tar.gz"
+tar -xzf "tokenpool_${os}_${arch}.tar.gz"
+sudo install "tokenpool_${os}_${arch}/tokenpool" /usr/local/bin/
+```
+
+Or with Go 1.23 or newer:
 
 ```sh
 go install github.com/nizarmah/tokenpool/cmd/tokenpool@latest
