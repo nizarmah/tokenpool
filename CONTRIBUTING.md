@@ -23,7 +23,8 @@ gofmt -l .        # prints nothing when formatting is clean
 - `internal/config`: YAML loading, `${ENV_VAR}` expansion, validation,
   model mapping
 - `internal/pool`: upstream order, cooldowns, the admin-managed pool file
-- `internal/translate`: Anthropic ⇄ OpenAI requests, responses and streams
+- `internal/translate`: Anthropic Messages ⇄ OpenAI Responses requests,
+  responses and streams
 - `internal/proxy`: HTTP server, failover, rate-limit parsing, admin API
 - `cmd/tokenpool`: the binary
 

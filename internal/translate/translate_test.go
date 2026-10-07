@@ -25,7 +25,7 @@ func sameJSON(t *testing.T, got []byte, want string) {
 	}
 }
 
-func TestAnthropicToOpenAI(t *testing.T) {
+func TestAnthropicToResponses(t *testing.T) {
 	in := `{
 	  "model": "claude-sonnet-5", "max_tokens": 1024, "stream": true, "temperature": 0.5,
 	  "stop_sequences": ["END"], "metadata": {"user_id": "u1"},
@@ -54,63 +54,62 @@ func TestAnthropicToOpenAI(t *testing.T) {
 	    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_2", "content": "boom", "is_error": true}]}
 	  ]
 	}`
-	got, err := AnthropicToOpenAI([]byte(in))
+	got, err := AnthropicToResponses([]byte(in))
 	if err != nil {
 		t.Fatal(err)
 	}
 	sameJSON(t, got, `{
-	  "model": "claude-sonnet-5", "max_tokens": 1024, "stream": true, "temperature": 0.5,
-	  "stream_options": {"include_usage": true}, "stop": ["END"], "user": "u1",
-	  "tools": [{"type": "function", "function": {"name": "read", "description": "Read a file", "parameters": {"type": "object"}}}],
+	  "model": "claude-sonnet-5", "max_output_tokens": 1024, "stream": true, "temperature": 0.5,
+	  "store": false, "user": "u1", "instructions": "Be brief.",
+	  "tools": [{"type": "function", "name": "read", "description": "Read a file", "parameters": {"type": "object"}}],
 	  "tool_choice": "required", "parallel_tool_calls": false,
-	  "messages": [
-	    {"role": "system", "content": "Be brief."},
+	  "input": [
 	    {"role": "user", "content": "Read a.txt"},
-	    {"role": "assistant", "content": "Reading.", "tool_calls": [
-	      {"id": "toolu_1", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"a.txt\"}"}}
-	    ]},
-	    {"role": "tool", "tool_call_id": "toolu_1", "content": "hello"},
+	    {"role": "assistant", "content": "Reading."},
+	    {"type": "function_call", "call_id": "toolu_1", "name": "read", "arguments": "{\"path\":\"a.txt\"}"},
+	    {"type": "function_call_output", "call_id": "toolu_1", "output": "hello"},
 	    {"role": "user", "content": [
-	      {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
-	      {"type": "text", "text": "What does it say?"}
+	      {"type": "input_image", "image_url": "data:image/png;base64,AAA"},
+	      {"type": "input_text", "text": "What does it say?"}
 	    ]},
-	    {"role": "assistant", "content": null, "tool_calls": [
-	      {"id": "toolu_2", "type": "function", "function": {"name": "read", "arguments": "{}"}}
-	    ]},
-	    {"role": "tool", "tool_call_id": "toolu_2", "content": "Error: boom"}
+	    {"type": "function_call", "call_id": "toolu_2", "name": "read", "arguments": "{}"},
+	    {"type": "function_call_output", "call_id": "toolu_2", "output": "Error: boom"}
 	  ]
 	}`)
 }
 
-func TestOpenAIToAnthropic(t *testing.T) {
+func TestResponsesToAnthropic(t *testing.T) {
 	in := `{
-	  "model": "gpt-4o", "max_completion_tokens": 500, "temperature": 1.5, "stop": "END",
-	  "parallel_tool_calls": false, "user": "u1", "n": 1, "response_format": {"type": "text"},
-	  "tools": [{"type": "function", "function": {"name": "read", "parameters": {"type": "object"}}},
-	            {"type": "function", "function": {"name": "now"}}],
-	  "messages": [
-	    {"role": "system", "content": "Be brief."},
-	    {"role": "developer", "content": [{"type": "text", "text": "Use tools."}]},
+	  "model": "gpt-5", "max_output_tokens": 500, "temperature": 1.5, "store": true,
+	  "parallel_tool_calls": false, "safety_identifier": "u1", "reasoning": {"effort": "low"},
+	  "instructions": "Be brief.",
+	  "tools": [{"type": "function", "name": "read", "parameters": {"type": "object"}},
+	            {"type": "function", "name": "now"},
+	            {"type": "web_search"}],
+	  "input": [
+	    {"role": "developer", "content": [{"type": "input_text", "text": "Use tools."}]},
 	    {"role": "user", "content": [
-	      {"type": "text", "text": "Look:"},
-	      {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,BBB"}},
-	      {"type": "image_url", "image_url": {"url": "https://example.com/x.png"}}
+	      {"type": "input_text", "text": "Look:"},
+	      {"type": "input_image", "image_url": "data:image/jpeg;base64,BBB"},
+	      {"type": "input_image", "image_url": "https://example.com/x.png"},
+	      {"type": "input_file", "filename": "a.pdf", "file_data": "data:application/pdf;base64,CCC"}
 	    ]},
-	    {"role": "assistant", "content": null, "tool_calls": [
-	      {"id": "call.1", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"a\"}"}},
-	      {"id": "call_2", "type": "function", "function": {"name": "now", "arguments": ""}}
-	    ]},
-	    {"role": "tool", "tool_call_id": "call.1", "content": "file body"},
-	    {"role": "tool", "tool_call_id": "call_2", "content": "noon"},
+	    {"type": "reasoning", "id": "rs_1", "summary": []},
+	    {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+	     "content": [{"type": "output_text", "text": "Checking.", "annotations": []}]},
+	    {"type": "function_call", "id": "fc_1", "call_id": "call.1", "name": "read", "arguments": "{\"path\":\"a\"}"},
+	    {"type": "function_call", "call_id": "call_2", "name": "now", "arguments": ""},
+	    {"type": "function_call_output", "call_id": "call.1", "output": "file body"},
+	    {"type": "function_call_output", "call_id": "call_2", "output": [{"type": "input_text", "text": "noon"}]},
 	    {"role": "user", "content": "Thanks"}
 	  ]
 	}`
-	got, err := OpenAIToAnthropic([]byte(in), 8192)
+	got, err := ResponsesToAnthropic([]byte(in), 8192)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sameJSON(t, got, `{
-	  "model": "gpt-4o", "max_tokens": 500, "temperature": 1, "stop_sequences": ["END"],
+	  "model": "gpt-5", "max_tokens": 500, "temperature": 1,
 	  "system": "Be brief.\n\nUse tools.", "metadata": {"user_id": "u1"},
 	  "tools": [{"name": "read", "input_schema": {"type": "object"}},
 	            {"name": "now", "input_schema": {"type": "object", "properties": {}}}],
@@ -119,42 +118,58 @@ func TestOpenAIToAnthropic(t *testing.T) {
 	    {"role": "user", "content": [
 	      {"type": "text", "text": "Look:"},
 	      {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "BBB"}},
-	      {"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}}
+	      {"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}},
+	      {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "CCC"}}
 	    ]},
 	    {"role": "assistant", "content": [
+	      {"type": "text", "text": "Checking."},
 	      {"type": "tool_use", "id": "call_1", "name": "read", "input": {"path": "a"}},
 	      {"type": "tool_use", "id": "call_2", "name": "now", "input": {}}
 	    ]},
 	    {"role": "user", "content": [
 	      {"type": "tool_result", "tool_use_id": "call_1", "content": "file body"},
-	      {"type": "tool_result", "tool_use_id": "call_2", "content": "noon"},
+	      {"type": "tool_result", "tool_use_id": "call_2", "content": [{"type": "text", "text": "noon"}]},
 	      {"type": "text", "text": "Thanks"}
 	    ]}
 	  ]
 	}`)
 
-	minimal, err := OpenAIToAnthropic([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"tool_choice":"required"}`), 4096)
+	minimal, err := ResponsesToAnthropic([]byte(`{"model":"m","input":"hi","tool_choice":"required"}`), 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sameJSON(t, minimal, `{"model":"m","max_tokens":4096,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	for _, stateful := range []string{
+		`{"model":"m","previous_response_id":"resp_1","input":"more"}`,
+		`{"model":"m","conversation":"conv_1","input":"more"}`,
+		`{"model":"m","input":[{"type":"item_reference","id":"msg_1"}]}`,
+	} {
+		if _, err := ResponsesToAnthropic([]byte(stateful), 4096); !errors.Is(err, ErrStateful) {
+			t.Errorf("ResponsesToAnthropic(%s) err = %v, want ErrStateful", stateful, err)
+		}
+	}
 }
 
 func TestResponses(t *testing.T) {
-	openai := `{
-	  "id": "chatcmpl-1", "model": "grok-4",
-	  "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
-	    "role": "assistant", "content": "Let me check.",
-	    "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"a\"}"}}]
-	  }}],
-	  "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120, "prompt_tokens_details": {"cached_tokens": 40}}
+	upstream := `{
+	  "id": "resp_1", "object": "response", "model": "grok-4", "status": "completed",
+	  "output": [
+	    {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "hmm"}]},
+	    {"type": "message", "id": "msg_a", "role": "assistant", "status": "completed",
+	     "content": [{"type": "output_text", "text": "Let me check.", "annotations": []}]},
+	    {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read",
+	     "arguments": "{\"path\":\"a\"}", "status": "completed"}
+	  ],
+	  "usage": {"input_tokens": 100, "input_tokens_details": {"cached_tokens": 40},
+	            "output_tokens": 20, "output_tokens_details": {"reasoning_tokens": 5}, "total_tokens": 120}
 	}`
-	got, err := OpenAIResponseToAnthropic([]byte(openai))
+	got, err := ResponsesResponseToAnthropic([]byte(upstream))
 	if err != nil {
 		t.Fatal(err)
 	}
 	sameJSON(t, got, `{
-	  "id": "msg_chatcmpl-1", "type": "message", "role": "assistant", "model": "grok-4",
+	  "id": "msg_resp_1", "type": "message", "role": "assistant", "model": "grok-4",
 	  "content": [
 	    {"type": "text", "text": "Let me check."},
 	    {"type": "tool_use", "id": "call_1", "name": "read", "input": {"path": "a"}}
@@ -162,6 +177,18 @@ func TestResponses(t *testing.T) {
 	  "stop_reason": "tool_use", "stop_sequence": null,
 	  "usage": {"input_tokens": 60, "output_tokens": 20, "cache_read_input_tokens": 40}
 	}`)
+
+	cut, err := ResponsesResponseToAnthropic([]byte(`{"id":"r2","model":"m","status":"incomplete",
+	  "incomplete_details":{"reason":"max_output_tokens"},"output":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameJSON(t, cut, `{"id":"msg_r2","type":"message","role":"assistant","model":"m","content":[],
+	  "stop_reason":"max_tokens","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
+
+	if _, err := ResponsesResponseToAnthropic([]byte(`{"status":"failed","error":{"code":"server_error","message":"boom"}}`)); err == nil || err.Error() != "boom" {
+		t.Errorf("failed response err = %v", err)
+	}
 
 	anthropic := `{
 	  "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-sonnet-5",
@@ -173,22 +200,39 @@ func TestResponses(t *testing.T) {
 	  "stop_reason": "tool_use",
 	  "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 90}
 	}`
-	got, err = AnthropicResponseToOpenAI([]byte(anthropic))
+	got, err = AnthropicResponseToResponses([]byte(anthropic))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var r map[string]any
 	_ = json.Unmarshal(got, &r)
-	delete(r, "created")
+	if created, ok := r["created_at"].(float64); !ok || created <= 0 {
+		t.Errorf("created_at = %v", r["created_at"])
+	}
+	delete(r, "created_at")
 	got, _ = json.Marshal(r)
 	sameJSON(t, got, `{
-	  "id": "msg_1", "object": "chat.completion", "model": "claude-sonnet-5",
-	  "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
-	    "role": "assistant", "content": "Done", "reasoning_content": "plan",
-	    "tool_calls": [{"id": "toolu_1", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"a\"}"}}]
-	  }}],
-	  "usage": {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105, "prompt_tokens_details": {"cached_tokens": 90}}
+	  "id": "resp_1", "object": "response", "status": "completed", "model": "claude-sonnet-5",
+	  "incomplete_details": null, "error": null,
+	  "output": [
+	    {"type": "message", "id": "msg_1_1", "status": "completed", "role": "assistant",
+	     "content": [{"type": "output_text", "text": "Done", "annotations": []}]},
+	    {"type": "function_call", "id": "fc_toolu_1", "call_id": "toolu_1", "name": "read",
+	     "arguments": "{\"path\":\"a\"}", "status": "completed"}
+	  ],
+	  "usage": {"input_tokens": 100, "input_tokens_details": {"cached_tokens": 90}, "output_tokens": 5,
+	            "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 105}
 	}`)
+
+	got, err = AnthropicResponseToResponses([]byte(`{"id":"msg_2","model":"m","content":[{"type":"text","text":"cut"}],
+	  "stop_reason":"max_tokens","usage":{"input_tokens":1,"output_tokens":2}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = json.Unmarshal(got, &r)
+	if r["status"] != "incomplete" || r["incomplete_details"].(map[string]any)["reason"] != "max_output_tokens" {
+		t.Errorf("max_tokens response = %s", got)
+	}
 }
 
 type event struct {
@@ -217,20 +261,37 @@ func parseEvents(t *testing.T, stream string) []event {
 	return out
 }
 
-func TestOpenAIStreamToAnthropic(t *testing.T) {
-	upstream := strings.Join([]string{
-		`data: {"id":"c1","model":"grok-4","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}`,
-		`data: {"id":"c1","model":"grok-4","choices":[{"index":0,"delta":{"content":"Hel"}}]}`,
-		`data: {"id":"c1","model":"grok-4","choices":[{"index":0,"delta":{"content":"lo"}}]}`,
-		`data: {"id":"c1","model":"grok-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"read","arguments":"{\"pa"}}]}}]}`,
-		`data: {"id":"c1","model":"grok-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"now","arguments":""}}]}}]}`,
-		`data: {"id":"c1","model":"grok-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"a\"}"}}]}}]}`,
-		`data: {"id":"c1","model":"grok-4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
-		`data: {"id":"c1","model":"grok-4","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}`,
-		`data: [DONE]`,
-	}, "\n\n") + "\n\n"
+// sse joins events into a stream: each entry is "name" + "\n" + data, or
+// data alone for an unnamed event.
+func sse(events ...string) string {
+	var b strings.Builder
+	for _, e := range events {
+		if name, data, ok := strings.Cut(e, "\n"); ok {
+			b.WriteString("event: " + name + "\ndata: " + data + "\n\n")
+		} else {
+			b.WriteString("data: " + e + "\n\n")
+		}
+	}
+	return b.String()
+}
+
+func TestResponsesStreamToAnthropic(t *testing.T) {
+	upstream := sse(
+		"response.created\n"+`{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","model":"grok-4","status":"in_progress","output":[]}}`,
+		"response.output_item.added\n"+`{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}`,
+		"response.reasoning_summary_text.delta\n"+`{"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"hmm"}`,
+		"response.output_item.added\n"+`{"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_a","role":"assistant","status":"in_progress","content":[]}}`,
+		"response.output_text.delta\n"+`{"type":"response.output_text.delta","item_id":"msg_a","output_index":1,"content_index":0,"delta":"Hel"}`,
+		"response.output_text.delta\n"+`{"type":"response.output_text.delta","item_id":"msg_a","output_index":1,"content_index":0,"delta":"lo"}`,
+		"response.output_item.added\n"+`{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"read","arguments":"","status":"in_progress"}}`,
+		"response.output_item.added\n"+`{"type":"response.output_item.added","output_index":3,"item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"now","arguments":"","status":"in_progress"}}`,
+		"response.function_call_arguments.delta\n"+`{"type":"response.function_call_arguments.delta","item_id":"fc_a","output_index":2,"delta":"{\"pa"}`,
+		"response.function_call_arguments.delta\n"+`{"type":"response.function_call_arguments.delta","item_id":"fc_a","output_index":2,"delta":"th\":\"a\"}"}`,
+		"response.output_item.done\n"+`{"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"read","arguments":"{\"path\":\"a\"}","status":"completed"}}`,
+		"response.completed\n"+`{"type":"response.completed","response":{"id":"resp_1","model":"grok-4","status":"completed","output":[],"usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}}`,
+	)
 	var out bytes.Buffer
-	if err := OpenAIStreamToAnthropic(&out, nil, strings.NewReader(upstream), "fallback"); err != nil {
+	if err := ResponsesStreamToAnthropic(&out, nil, strings.NewReader(upstream), "fallback"); err != nil {
 		t.Fatal(err)
 	}
 	events := parseEvents(t, out.String())
@@ -248,7 +309,7 @@ func TestOpenAIStreamToAnthropic(t *testing.T) {
 		t.Fatalf("events:\n%s\nwant:\n%s", got, want)
 	}
 	msg := events[0].data["message"].(map[string]any)
-	if msg["id"] != "msg_c1" || msg["model"] != "grok-4" {
+	if msg["id"] != "msg_resp_1" || msg["model"] != "grok-4" {
 		t.Errorf("message_start = %v", msg)
 	}
 	tool := events[5].data["content_block"].(map[string]any)
@@ -270,10 +331,28 @@ func TestOpenAIStreamToAnthropic(t *testing.T) {
 	}
 }
 
-func TestOpenAIStreamIncomplete(t *testing.T) {
-	upstream := `data: {"id":"c1","choices":[{"index":0,"delta":{"content":"Hi"}}]}` + "\n\n"
+func TestResponsesStreamCutShort(t *testing.T) {
+	// Unnamed events, as some servers send them, ending at max_output_tokens.
+	upstream := sse(
+		`{"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"Hi"}`,
+		`{"type":"response.incomplete","response":{"id":"r1","model":"m","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`,
+		`[DONE]`,
+	)
 	var out bytes.Buffer
-	err := OpenAIStreamToAnthropic(&out, nil, strings.NewReader(upstream), "m")
+	if err := ResponsesStreamToAnthropic(&out, nil, strings.NewReader(upstream), "m"); err != nil {
+		t.Fatal(err)
+	}
+	events := parseEvents(t, out.String())
+	delta := events[len(events)-2].data["delta"].(map[string]any)
+	if delta["stop_reason"] != "max_tokens" {
+		t.Errorf("stop_reason = %v", delta["stop_reason"])
+	}
+}
+
+func TestResponsesStreamIncomplete(t *testing.T) {
+	upstream := sse(`{"type":"response.output_text.delta","output_index":0,"delta":"Hi"}`, `[DONE]`)
+	var out bytes.Buffer
+	err := ResponsesStreamToAnthropic(&out, nil, strings.NewReader(upstream), "m")
 	if !errors.Is(err, ErrIncomplete) {
 		t.Fatalf("err = %v", err)
 	}
@@ -283,18 +362,23 @@ func TestOpenAIStreamIncomplete(t *testing.T) {
 	}
 }
 
-func TestOpenAIStreamUpstreamError(t *testing.T) {
-	upstream := `data: {"error":{"message":"model overloaded","type":"server_error"}}` + "\n\n"
-	var out bytes.Buffer
-	if err := OpenAIStreamToAnthropic(&out, nil, strings.NewReader(upstream), "m"); err == nil {
-		t.Fatal("want error")
-	}
-	if !strings.Contains(out.String(), "model overloaded") {
-		t.Errorf("error not relayed: %s", out.String())
+func TestResponsesStreamUpstreamError(t *testing.T) {
+	for _, upstream := range []string{
+		sse("error\n" + `{"type":"error","code":"server_error","message":"model overloaded","param":null}`),
+		sse("response.failed\n" + `{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"model overloaded"}}}`),
+		sse(`{"error":{"message":"model overloaded","type":"server_error"}}`),
+	} {
+		var out bytes.Buffer
+		if err := ResponsesStreamToAnthropic(&out, nil, strings.NewReader(upstream), "m"); err == nil {
+			t.Fatal("want error")
+		}
+		if !strings.Contains(out.String(), "model overloaded") {
+			t.Errorf("error not relayed: %s", out.String())
+		}
 	}
 }
 
-func TestAnthropicStreamToOpenAI(t *testing.T) {
+func TestAnthropicStreamToResponses(t *testing.T) {
 	upstream := `event: message_start
 data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-5","content":[],"usage":{"input_tokens":12,"output_tokens":1}}}
 
@@ -302,25 +386,34 @@ event: ping
 data: {"type":"ping"}
 
 event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"plan"}}
 
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}
 
 event: content_block_start
-data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read","input":{}}}
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}
-
-event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"a\"}"}}
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hi"}}
 
 event: content_block_stop
 data: {"type":"content_block_stop","index":1}
+
+event: content_block_start
+data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"read","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"\"a\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":2}
 
 event: message_delta
 data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":9}}
@@ -330,51 +423,62 @@ data: {"type":"message_stop"}
 
 `
 	var out bytes.Buffer
-	if err := AnthropicStreamToOpenAI(&out, nil, strings.NewReader(upstream), true); err != nil {
+	if err := AnthropicStreamToResponses(&out, nil, strings.NewReader(upstream)); err != nil {
 		t.Fatal(err)
 	}
 	events := parseEvents(t, out.String())
-	if len(events) != 8 {
-		t.Fatalf("got %d events:\n%s", len(events), out.String())
+	var seq []string
+	for i, e := range events {
+		if e.name != e.data["type"] {
+			t.Errorf("event %q carries type %v", e.name, e.data["type"])
+		}
+		if e.data["sequence_number"] != float64(i) {
+			t.Errorf("event %d has sequence_number %v", i, e.data["sequence_number"])
+		}
+		seq = append(seq, strings.TrimPrefix(e.name, "response."))
 	}
-	delta := func(i int) map[string]any {
-		return events[i].data["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)
+	want := "created in_progress " +
+		"output_item.added content_part.added output_text.delta output_text.done content_part.done output_item.done " +
+		"output_item.added function_call_arguments.delta function_call_arguments.delta function_call_arguments.done output_item.done " +
+		"completed"
+	if got := strings.Join(seq, " "); got != want {
+		t.Fatalf("events:\n%s\nwant:\n%s", got, want)
 	}
-	if delta(0)["role"] != "assistant" || events[0].data["id"] != "msg_1" {
-		t.Errorf("first chunk = %v", events[0].data)
+	if r := events[0].data["response"].(map[string]any); r["id"] != "resp_1" || r["status"] != "in_progress" {
+		t.Errorf("created = %v", r)
 	}
-	if delta(1)["content"] != "Hi" {
-		t.Errorf("text chunk = %v", delta(1))
+	text := events[2].data
+	if text["output_index"] != 0.0 || text["item"].(map[string]any)["type"] != "message" {
+		t.Errorf("text item = %v", text)
 	}
-	call := delta(2)["tool_calls"].([]any)[0].(map[string]any)
-	if call["id"] != "toolu_1" || call["index"] != 0.0 || call["function"].(map[string]any)["name"] != "read" {
-		t.Errorf("tool start = %v", call)
+	if events[4].data["delta"] != "Hi" || events[5].data["text"] != "Hi" {
+		t.Errorf("text events = %v, %v", events[4].data, events[5].data)
 	}
-	args := delta(3)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)["arguments"].(string) +
-		delta(4)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)["arguments"].(string)
-	if args != `{"path":"a"}` {
-		t.Errorf("args = %s", args)
+	call := events[8].data["item"].(map[string]any)
+	if events[8].data["output_index"] != 1.0 || call["call_id"] != "toolu_1" || call["name"] != "read" {
+		t.Errorf("call item = %v", events[8].data)
 	}
-	final := events[5].data["choices"].([]any)[0].(map[string]any)
-	if final["finish_reason"] != "tool_calls" {
-		t.Errorf("finish = %v", final)
+	if args := events[11].data["arguments"]; args != `{"path":"a"}` {
+		t.Errorf("args = %v", args)
 	}
-	usage := events[6].data["usage"].(map[string]any)
-	if usage["prompt_tokens"] != 12.0 || usage["completion_tokens"] != 9.0 {
+	final := events[13].data["response"].(map[string]any)
+	if final["status"] != "completed" || len(final["output"].([]any)) != 2 {
+		t.Errorf("completed = %v", final)
+	}
+	usage := final["usage"].(map[string]any)
+	if usage["input_tokens"] != 12.0 || usage["output_tokens"] != 9.0 {
 		t.Errorf("usage = %v", usage)
-	}
-	if events[7].name != "[DONE]" {
-		t.Errorf("last = %v", events[7])
 	}
 }
 
 func TestAnthropicStreamError(t *testing.T) {
 	upstream := "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n"
 	var out bytes.Buffer
-	if err := AnthropicStreamToOpenAI(&out, nil, strings.NewReader(upstream), false); err == nil {
+	if err := AnthropicStreamToResponses(&out, nil, strings.NewReader(upstream)); err == nil {
 		t.Fatal("want error")
 	}
-	if !strings.Contains(out.String(), "Overloaded") || !strings.HasSuffix(out.String(), "data: [DONE]\n\n") {
+	events := parseEvents(t, out.String())
+	if len(events) != 1 || events[0].name != "error" || events[0].data["message"] != "Overloaded" {
 		t.Errorf("out = %s", out.String())
 	}
 }
@@ -391,8 +495,10 @@ func TestRewrite(t *testing.T) {
 	if !bytes.Equal(same, body) {
 		t.Error("unchanged body was re-encoded")
 	}
-	under, _ := Rewrite([]byte(`{"model":"a","max_completion_tokens":10}`), "", 8000)
-	sameJSON(t, under, `{"model":"a","max_completion_tokens":10}`)
+	capped, _ := Rewrite([]byte(`{"model":"a","max_output_tokens":64000}`), "", 8000)
+	sameJSON(t, capped, `{"model":"a","max_output_tokens":8000}`)
+	under, _ := Rewrite([]byte(`{"model":"a","max_output_tokens":10}`), "", 8000)
+	sameJSON(t, under, `{"model":"a","max_output_tokens":10}`)
 }
 
 func TestErrorMessage(t *testing.T) {

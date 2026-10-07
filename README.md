@@ -5,8 +5,8 @@
 Pool your LLM API keys behind one endpoint. When a key hits its rate limit,
 runs out of credits or its provider goes down, tokenpool sends the request
 to the next upstream instead: another Claude key, Grok, or any API that
-speaks the Anthropic or OpenAI format. The client gets one normal answer
-and never sees the switch.
+speaks the Anthropic Messages or OpenAI Responses API. The client gets one
+normal answer and never sees the switch.
 
 ```
  Claude Code / SDKs ──► tokenpool ──► claude-primary    (429: back in 3m)
@@ -17,10 +17,10 @@ and never sees the switch.
 
 - **Any URL, any credential.** Each upstream is one credential: a Claude
   Console API key, a Claude Code setup-token, a Grok API key, or a Grok
-  login. List as many as you have. The API it speaks is `anthropic` or
-  `openai`.
+  login. List as many as you have. The API it speaks is `anthropic`
+  (Messages) or `openai` (Responses).
 - **Both APIs on the front.** Clients call `POST /v1/messages` (Anthropic)
-  or `POST /v1/chat/completions` (OpenAI). When the upstream speaks the
+  or `POST /v1/responses` (OpenAI). When the upstream speaks the
   other API, tokenpool translates the request, the response and the stream,
   tool calls included. Claude Code keeps working even when Grok answers.
 - **Limit-aware failover.** Cooldowns come from `Retry-After` and the
@@ -87,7 +87,7 @@ claude
 
 Anthropic SDK: `Anthropic(base_url="http://localhost:8080", api_key="tp-...")`
 
-OpenAI SDK, and anything OpenAI-compatible:
+OpenAI SDK, through the Responses API (`client.responses.create`):
 `OpenAI(base_url="http://localhost:8080/v1", api_key="tp-...")`
 
 Callers send their tokenpool key as `x-api-key` or `Authorization: Bearer`.
@@ -98,7 +98,7 @@ that answered.
 | --- | --- | --- |
 | `POST /v1/messages` | Anthropic Messages | Streaming and tools |
 | `POST /v1/messages/count_tokens` | Anthropic | Counted by an Anthropic upstream, or estimated when none is free |
-| `POST /v1/chat/completions` | OpenAI Chat Completions | Also at `/chat/completions` |
+| `POST /v1/responses` | OpenAI Responses | Streaming and tools. Also at `/responses` |
 | `GET /v1/models` | Both | Model names the config mentions |
 | `GET /healthz` | None | Needs no key |
 
@@ -239,8 +239,8 @@ xAI API key is the credential those terms allow. Details are under
 | field        | meaning |
 |--------------|---------|
 | `name`       | Identifier for logs, headers and the admin API. Letters, digits, `.`, `_` or `-`. |
-| `url`        | API base. `anthropic`: like the Anthropic SDK, no `/v1` (`https://api.anthropic.com`). `openai`: like the OpenAI SDK, with `/v1` (`https://api.x.ai/v1`); a bare host gets `/v1`. A URL that already ends in `/v1/messages` or `/chat/completions` is used as is. |
-| `format`     | `anthropic` (Messages API) or `openai` (Chat Completions). |
+| `url`        | API base. `anthropic`: like the Anthropic SDK, no `/v1` (`https://api.anthropic.com`). `openai`: like the OpenAI SDK, with `/v1` (`https://api.x.ai/v1`); a bare host gets `/v1`. A URL that already ends in `/v1/messages` or `/responses` is used as is. |
+| `format`     | `anthropic` (Messages API) or `openai` (Responses API). |
 | `token`      | The upstream credential: an API key, a Claude Code setup-token, or a Grok session token. |
 | `token_file` | Read the credential from this file instead, re-read whenever the file changes. `~` is your home directory. See [Keys from a file](#keys-from-a-file). |
 | `token_field` | Dot path to the credential inside a JSON `token_file`, such as `tokens.access_token`. For a Grok `auth.json` with several logins, the session name instead. |
@@ -295,7 +295,7 @@ keeps showing the old copy.
 | `admin_key` | unset (admin API off) | Key for `/admin`. Must differ from every caller key. |
 | `pool_file` | unset | Where admin-added upstreams are saved. A relative path sits next to the config. |
 | `strategy` | `failover` | `round_robin` spreads load across upstreams that share a priority. Later priorities and fallbacks still only take traffic when those are out. |
-| `default_max_tokens` | `8192` | Filled in when an OpenAI-style request without `max_tokens` goes to an Anthropic upstream. |
+| `default_max_tokens` | `8192` | Filled in when a Responses request without `max_output_tokens` goes to an Anthropic upstream. |
 | `max_body_bytes` | `67108864` | Largest request body accepted (64 MiB). |
 | `connect_timeout` | `10s` | Time to connect to an upstream. |
 | `header_timeout` | `10m` | Wait for an upstream's first response byte before failing over. |
@@ -349,21 +349,29 @@ curl -X DELETE localhost:8080/admin/upstreams/claude-third -H "$A"
 ## Translation notes
 
 When client and upstream speak the same API, the body passes through
-untouched apart from `model` and the `max_tokens` cap. Anthropic-only
-fields (`thinking`, `cache_control`, betas) keep working against Claude.
+untouched apart from `model` and the `max_tokens` (or `max_output_tokens`)
+cap. Anthropic-only fields (`thinking`, `cache_control`, betas) keep
+working against Claude.
 
 Across APIs, tokenpool translates text, images, system prompts, tools,
-tool calls and results, stop sequences, usage and streaming. Some features
-have no equivalent on the other side, so they're dropped:
+tool calls and results, usage and streaming. Some features have no
+equivalent on the other side, so they're dropped:
 
-- Anthropic → OpenAI upstream: extended thinking, prompt-cache controls,
-  server tools (web search, code execution), PDF documents. Tool-result
-  images go in the next user message.
-- OpenAI → Anthropic upstream: `n`, `response_format`, `logprobs`, audio.
+- Anthropic → Responses upstream: extended thinking, prompt-cache controls,
+  server tools (web search, code execution), PDF documents and stop
+  sequences. Tool-result images go in the next user message. tokenpool
+  sends `store: false`: the next turn may go to another upstream, so
+  nothing stored would be used.
+- Responses → Anthropic upstream: reasoning items, built-in tools,
+  `text.format`, `logprobs`, and files other than inline PDFs.
   `temperature` is capped at 1, and `max_tokens` defaults to
   `default_max_tokens` (8192) because Anthropic requires one.
+- tokenpool is stateless. Send the whole conversation in `input` each
+  turn: a request with `previous_response_id`, `conversation` or an
+  `item_reference` skips Anthropic upstreams, and only the Responses
+  upstream that stored that response can serve it.
 - In translated streams, text streams live, but each tool call arrives
-  whole when it finishes. (OpenAI providers may interleave parallel
+  whole when it finishes. (Responses providers may interleave parallel
   calls, and Anthropic's stream format can't express that.)
 
 `/v1/messages/count_tokens` goes to an Anthropic upstream. If none is

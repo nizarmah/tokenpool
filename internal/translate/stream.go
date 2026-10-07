@@ -2,6 +2,7 @@ package translate
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,28 +84,22 @@ func (s *sseWriter) write(text string) {
 	}
 }
 
-// event writes an Anthropic-style event: "event: name" plus JSON data.
+// event writes a named event: "event: name" plus JSON data.
 func (s *sseWriter) event(name string, v any) {
 	b, _ := json.Marshal(v)
 	s.write("event: " + name + "\ndata: " + string(b) + "\n\n")
 }
 
-// data writes an OpenAI-style event: JSON data only.
-func (s *sseWriter) data(v any) {
-	b, _ := json.Marshal(v)
-	s.write("data: " + string(b) + "\n\n")
-}
-
-// OpenAIStreamToAnthropic reads a Chat Completions stream from r and
-// writes the equivalent Messages API stream to w. model names the message
-// if the upstream chunks do not.
-func OpenAIStreamToAnthropic(w io.Writer, flush func(), r io.Reader, model string) error {
-	c := &openaiToAnthropic{out: sseWriter{w: w, flush: flush}, model: model, byIndex: map[int]*pendingTool{}}
+// ResponsesStreamToAnthropic reads a Responses API stream from r and writes
+// the equivalent Messages API stream to w. model names the message if the
+// upstream events do not.
+func ResponsesStreamToAnthropic(w io.Writer, flush func(), r io.Reader, model string) error {
+	c := &responsesToAnthropic{out: sseWriter{w: w, flush: flush}, model: model, byIndex: map[int]*pendingTool{}}
 	err := readSSE(r, c.handle)
 	switch {
 	case errors.Is(err, errDone):
 		err = nil
-	case err == nil && c.finish == "":
+	case err == nil:
 		err = ErrIncomplete
 	}
 	if err != nil {
@@ -119,51 +114,81 @@ type pendingTool struct {
 	args     strings.Builder
 }
 
-type openaiToAnthropic struct {
-	out      sseWriter
-	model    string
-	started  bool
-	index    int // next content block index
-	textOpen bool
-	tools    []*pendingTool
-	byIndex  map[int]*pendingTool
-	finish   string
-	usage    *openaiUsage
+type responsesToAnthropic struct {
+	out        sseWriter
+	model      string
+	started    bool
+	index      int // next content block index
+	textOpen   bool
+	tools      []*pendingTool
+	byIndex    map[int]*pendingTool // output_index -> tool
+	status     string
+	incomplete string
+	usage      *responsesUsage
 }
 
-func (c *openaiToAnthropic) handle(ev sseEvent) error {
+func (c *responsesToAnthropic) handle(ev sseEvent) error {
 	if strings.TrimSpace(ev.Data) == "[DONE]" {
+		return nil // only response.completed or response.incomplete ends it
+	}
+	var e responsesEvent
+	if err := json.Unmarshal([]byte(ev.Data), &e); err != nil {
+		return fmt.Errorf("bad upstream event: %w", err)
+	}
+	switch e.Type {
+	case "response.created", "response.in_progress":
+		if r := e.Response; r != nil {
+			c.start(r.ID, r.Model)
+		}
+	case "response.output_text.delta", "response.refusal.delta":
+		if d := e.delta(); d != "" {
+			c.start("", "")
+			c.text(d)
+		}
+	case "response.output_item.added", "response.output_item.done":
+		if it := e.Item; it != nil && it.Type == "function_call" {
+			c.tool(e.OutputIndex, it)
+		}
+	case "response.function_call_arguments.delta":
+		if t := c.byIndex[e.OutputIndex]; t != nil {
+			t.args.WriteString(e.delta())
+		}
+	case "response.function_call_arguments.done":
+		if t := c.byIndex[e.OutputIndex]; t != nil && e.Arguments != "" {
+			t.args.Reset()
+			t.args.WriteString(e.Arguments)
+		}
+	case "response.completed", "response.incomplete":
+		c.status = strings.TrimPrefix(e.Type, "response.")
+		if r := e.Response; r != nil {
+			c.start(r.ID, r.Model)
+			c.status = cmp.Or(r.Status, c.status)
+			c.incomplete, c.usage = r.incompleteReason(), r.Usage
+		}
 		return errDone
-	}
-	var chunk openaiChunk
-	if err := json.Unmarshal([]byte(ev.Data), &chunk); err != nil {
-		return fmt.Errorf("bad upstream chunk: %w", err)
-	}
-	if chunk.Error != nil {
-		return errors.New(chunk.Error.Message)
-	}
-	c.start(chunk.ID, chunk.Model)
-	for _, choice := range chunk.Choices {
-		if choice.Index != 0 {
-			continue
+	case "response.failed":
+		if r := e.Response; r != nil && r.Error != nil && r.Error.Message != "" {
+			return errors.New(r.Error.Message)
 		}
-		if choice.Delta.Content != "" {
-			c.text(choice.Delta.Content)
+		return errors.New("upstream response failed")
+	case "error":
+		return errors.New(cmp.Or(e.Message, errorText(e.Error), "upstream error"))
+	case "":
+		if e.Error != nil {
+			return errors.New(cmp.Or(e.Error.Message, "upstream error"))
 		}
-		for _, tc := range choice.Delta.ToolCalls {
-			c.tool(tc)
-		}
-		if choice.FinishReason != nil && *choice.FinishReason != "" {
-			c.finish = *choice.FinishReason
-		}
-	}
-	if chunk.Usage != nil {
-		c.usage = chunk.Usage
 	}
 	return c.out.err
 }
 
-func (c *openaiToAnthropic) start(id, model string) {
+func errorText(e *apiError) string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
+func (c *responsesToAnthropic) start(id, model string) {
 	if c.started {
 		return
 	}
@@ -178,7 +203,7 @@ func (c *openaiToAnthropic) start(id, model string) {
 	}})
 }
 
-func (c *openaiToAnthropic) text(s string) {
+func (c *responsesToAnthropic) text(s string) {
 	if !c.textOpen {
 		c.out.event("content_block_start", obj{
 			"type": "content_block_start", "index": c.index,
@@ -192,7 +217,7 @@ func (c *openaiToAnthropic) text(s string) {
 	})
 }
 
-func (c *openaiToAnthropic) closeText() {
+func (c *responsesToAnthropic) closeText() {
 	if c.textOpen {
 		c.out.event("content_block_stop", obj{"type": "content_block_stop", "index": c.index})
 		c.index++
@@ -200,42 +225,26 @@ func (c *openaiToAnthropic) closeText() {
 	}
 }
 
-// tool buffers tool call fragments. Providers may interleave fragments of
-// parallel calls, which Anthropic blocks cannot express, so each call is
+// tool records a function call item. Argument deltas add to it, and the
+// final arguments replace whatever the deltas built. Parallel calls may
+// interleave, which Anthropic blocks cannot express, so each call is
 // emitted whole at the end.
-func (c *openaiToAnthropic) tool(tc openaiToolCall) {
-	var t *pendingTool
-	switch {
-	case tc.Index != nil:
-		t = c.byIndex[*tc.Index]
-		if t == nil {
-			t = &pendingTool{}
-			c.byIndex[*tc.Index] = t
-			c.tools = append(c.tools, t)
-		}
-	case tc.ID != "":
-		for _, existing := range c.tools {
-			if existing.id == tc.ID {
-				t = existing
-			}
-		}
-	case len(c.tools) > 0:
-		t = c.tools[len(c.tools)-1]
-	}
+func (c *responsesToAnthropic) tool(index int, it *responsesItem) {
+	t := c.byIndex[index]
 	if t == nil {
 		t = &pendingTool{}
+		c.byIndex[index] = t
 		c.tools = append(c.tools, t)
 	}
-	if t.id == "" {
-		t.id = tc.ID
+	t.id = cmp.Or(t.id, it.CallID, it.ID)
+	t.name = cmp.Or(t.name, it.Name)
+	if it.Arguments != "" {
+		t.args.Reset()
+		t.args.WriteString(it.Arguments)
 	}
-	if t.name == "" {
-		t.name = tc.Function.Name
-	}
-	t.args.WriteString(tc.Function.Arguments)
 }
 
-func (c *openaiToAnthropic) end() {
+func (c *responsesToAnthropic) end() {
 	c.start("", "")
 	c.closeText()
 	for i, t := range c.tools {
@@ -256,27 +265,26 @@ func (c *openaiToAnthropic) end() {
 		c.out.event("content_block_stop", obj{"type": "content_block_stop", "index": c.index})
 		c.index++
 	}
-	usage := usageToAnthropic(c.usage)
 	c.out.event("message_delta", obj{
 		"type":  "message_delta",
-		"delta": obj{"stop_reason": StopReason(c.finish, len(c.tools) > 0), "stop_sequence": nil},
-		"usage": usage,
+		"delta": obj{"stop_reason": StopReason(c.status, c.incomplete, len(c.tools) > 0), "stop_sequence": nil},
+		"usage": usageToAnthropic(c.usage),
 	})
 	c.out.event("message_stop", obj{"type": "message_stop"})
 }
 
-func (c *openaiToAnthropic) fail(err error) error {
+func (c *responsesToAnthropic) fail(err error) error {
 	c.out.event("error", obj{"type": "error", "error": obj{"type": "api_error", "message": err.Error()}})
 	return err
 }
 
-// AnthropicStreamToOpenAI reads a Messages API stream from r and writes the
-// equivalent Chat Completions stream to w. includeUsage adds the final
-// usage chunk that stream_options.include_usage asks for.
-func AnthropicStreamToOpenAI(w io.Writer, flush func(), r io.Reader, includeUsage bool) error {
-	c := &anthropicToOpenAI{
-		out: sseWriter{w: w, flush: flush}, includeUsage: includeUsage,
-		created: time.Now().Unix(), tools: map[int]int{},
+// AnthropicStreamToResponses reads a Messages API stream from r and writes
+// the equivalent Responses API stream to w: each text block becomes a
+// message item and each tool use a function_call item. Thinking is
+// dropped, as in AnthropicResponseToResponses.
+func AnthropicStreamToResponses(w io.Writer, flush func(), r io.Reader) error {
+	c := &anthropicToResponses{
+		out: sseWriter{w: w, flush: flush}, created: time.Now().Unix(), open: map[int]*streamItem{},
 	}
 	err := readSSE(r, c.handle)
 	switch {
@@ -285,19 +293,30 @@ func AnthropicStreamToOpenAI(w io.Writer, flush func(), r io.Reader, includeUsag
 	case err == nil:
 		err = ErrIncomplete
 	}
-	c.out.data(obj{"error": obj{"type": "server_error", "message": err.Error()}})
-	c.out.write("data: [DONE]\n\n")
+	c.emit("error", obj{"code": "server_error", "message": err.Error(), "param": nil})
 	return err
 }
 
-type anthropicToOpenAI struct {
-	out          sseWriter
-	includeUsage bool
-	id, model    string
-	created      int64
-	tools        map[int]int // content block index -> tool call index
-	usage        anthropicUsage
-	finish       string
+type anthropicToResponses struct {
+	out       sseWriter
+	seq       int
+	id, model string
+	created   int64
+	open      map[int]*streamItem // content block index -> item being streamed
+	output    []obj               // finished items
+	next      int                 // next output_index
+	usage     anthropicUsage
+	stop      string
+}
+
+// streamItem is an output item being streamed: a message's text, or a
+// function call's arguments.
+type streamItem struct {
+	index        int
+	id           string
+	call         bool
+	callID, name string
+	buf          strings.Builder
 }
 
 type anthropicEvent struct {
@@ -309,14 +328,13 @@ type anthropicEvent struct {
 		Type        string `json:"type"`
 		Text        string `json:"text"`
 		PartialJSON string `json:"partial_json"`
-		Thinking    string `json:"thinking"`
 		StopReason  string `json:"stop_reason"`
 	} `json:"delta"`
 	Usage *anthropicUsage `json:"usage"`
 	Error *apiError       `json:"error"`
 }
 
-func (c *anthropicToOpenAI) handle(ev sseEvent) error {
+func (c *anthropicToResponses) handle(ev sseEvent) error {
 	var e anthropicEvent
 	if err := json.Unmarshal([]byte(ev.Data), &e); err != nil {
 		return fmt.Errorf("bad upstream event: %w", err)
@@ -326,41 +344,52 @@ func (c *anthropicToOpenAI) handle(ev sseEvent) error {
 		if m := e.Message; m != nil {
 			c.id, c.model, c.usage = m.ID, m.Model, m.Usage
 		}
-		c.chunk(obj{"role": "assistant", "content": ""}, nil)
+		inProgress := responseObject(c.id, c.model, c.created, "in_progress", "", []obj{}, nil)
+		c.emit("response.created", obj{"response": inProgress})
+		c.emit("response.in_progress", obj{"response": inProgress})
 	case "content_block_start":
 		b := e.ContentBlock
-		switch {
-		case b == nil:
-		case b.Type == "tool_use":
-			i := len(c.tools)
-			c.tools[e.Index] = i
-			c.chunk(obj{"tool_calls": []obj{{
-				"index": i, "id": b.ID, "type": "function",
-				"function": obj{"name": b.Name, "arguments": ""},
-			}}}, nil)
-		case b.Type == "text" && b.Text != "":
-			c.chunk(obj{"content": b.Text}, nil)
-		}
-	case "content_block_delta":
-		d := e.Delta
-		if d == nil {
+		if b == nil || (b.Type != "text" && b.Type != "tool_use") {
 			break
 		}
-		switch d.Type {
-		case "text_delta":
-			c.chunk(obj{"content": d.Text}, nil)
-		case "thinking_delta":
-			c.chunk(obj{"reasoning_content": d.Thinking}, nil)
-		case "input_json_delta":
-			if i, ok := c.tools[e.Index]; ok {
-				c.chunk(obj{"tool_calls": []obj{{
-					"index": i, "function": obj{"arguments": d.PartialJSON},
-				}}}, nil)
-			}
+		it := &streamItem{index: c.next, call: b.Type == "tool_use", callID: b.ID, name: b.Name}
+		c.next++
+		c.open[e.Index] = it
+		if it.call {
+			it.id = "fc_" + b.ID
+			c.emit("response.output_item.added", obj{
+				"output_index": it.index, "item": functionCallItem(b.ID, b.Name, "", "in_progress"),
+			})
+			break
+		}
+		it.id = itemID(c.id, e.Index)
+		c.emit("response.output_item.added", obj{"output_index": it.index, "item": messageItem(it.id, "in_progress")})
+		c.emit("response.content_part.added", obj{
+			"item_id": it.id, "output_index": it.index, "content_index": 0, "part": outputText(""),
+		})
+		if b.Text != "" {
+			c.textDelta(it, b.Text)
+		}
+	case "content_block_delta":
+		it, d := c.open[e.Index], e.Delta
+		switch {
+		case it == nil || d == nil:
+		case d.Type == "text_delta" && !it.call:
+			c.textDelta(it, d.Text)
+		case d.Type == "input_json_delta" && it.call:
+			it.buf.WriteString(d.PartialJSON)
+			c.emit("response.function_call_arguments.delta", obj{
+				"item_id": it.id, "output_index": it.index, "delta": d.PartialJSON,
+			})
+		}
+	case "content_block_stop":
+		if it := c.open[e.Index]; it != nil {
+			delete(c.open, e.Index)
+			c.finish(it)
 		}
 	case "message_delta":
 		if e.Delta != nil && e.Delta.StopReason != "" {
-			c.finish = FinishReason(e.Delta.StopReason)
+			c.stop = e.Delta.StopReason
 		}
 		if u := e.Usage; u != nil {
 			c.usage.OutputTokens = u.OutputTokens
@@ -375,32 +404,53 @@ func (c *anthropicToOpenAI) handle(ev sseEvent) error {
 			}
 		}
 	case "message_stop":
-		finish := c.finish
-		if finish == "" {
-			finish = "stop"
-		}
-		c.chunk(obj{}, &finish)
-		if c.includeUsage {
-			c.out.data(obj{
-				"id": c.id, "object": "chat.completion.chunk", "created": c.created, "model": c.model,
-				"choices": []obj{}, "usage": usageToOpenAI(c.usage),
-			})
-		}
-		c.out.write("data: [DONE]\n\n")
+		status, incomplete := responseStatus(c.stop)
+		output := append([]obj{}, c.output...)
+		c.emit("response."+status, obj{
+			"response": responseObject(c.id, c.model, c.created, status, incomplete, output, &c.usage),
+		})
 		return errDone
 	case "error":
-		msg := "upstream error"
-		if e.Error != nil {
-			msg = e.Error.Message
-		}
-		return errors.New(msg)
+		return errors.New(cmp.Or(errorText(e.Error), "upstream error"))
 	}
 	return c.out.err
 }
 
-func (c *anthropicToOpenAI) chunk(delta obj, finish *string) {
-	c.out.data(obj{
-		"id": c.id, "object": "chat.completion.chunk", "created": c.created, "model": c.model,
-		"choices": []obj{{"index": 0, "delta": delta, "finish_reason": finish}},
+func (c *anthropicToResponses) textDelta(it *streamItem, text string) {
+	it.buf.WriteString(text)
+	c.emit("response.output_text.delta", obj{
+		"item_id": it.id, "output_index": it.index, "content_index": 0, "delta": text,
 	})
+}
+
+// finish closes an item with its done events and keeps it for the final
+// response.
+func (c *anthropicToResponses) finish(it *streamItem) {
+	var done obj
+	if it.call {
+		args := argumentsString(json.RawMessage(it.buf.String()))
+		c.emit("response.function_call_arguments.done", obj{
+			"item_id": it.id, "output_index": it.index, "arguments": args,
+		})
+		done = functionCallItem(it.callID, it.name, args, "completed")
+	} else {
+		text := it.buf.String()
+		c.emit("response.output_text.done", obj{
+			"item_id": it.id, "output_index": it.index, "content_index": 0, "text": text,
+		})
+		c.emit("response.content_part.done", obj{
+			"item_id": it.id, "output_index": it.index, "content_index": 0, "part": outputText(text),
+		})
+		done = messageItem(it.id, "completed", text)
+	}
+	c.emit("response.output_item.done", obj{"output_index": it.index, "item": done})
+	c.output = append(c.output, done)
+}
+
+// emit writes one Responses event, numbered in order.
+func (c *anthropicToResponses) emit(typ string, fields obj) {
+	fields["type"] = typ
+	fields["sequence_number"] = c.seq
+	c.seq++
+	c.out.event(typ, fields)
 }

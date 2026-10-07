@@ -115,13 +115,33 @@ func claudeMessage(w http.ResponseWriter, _ *http.Request, _ []byte) {
 
 func grokStream(w http.ResponseWriter, _ *http.Request, _ []byte) {
 	w.Header().Set("Content-Type", "text/event-stream")
-	for _, chunk := range []string{
-		`{"id":"g1","model":"grok-4","choices":[{"index":0,"delta":{"role":"assistant","content":"from "}}]}`,
-		`{"id":"g1","model":"grok-4","choices":[{"index":0,"delta":{"content":"grok"},"finish_reason":"stop"}]}`,
-		`{"id":"g1","model":"grok-4","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`,
-		`[DONE]`,
+	for _, event := range []string{
+		`{"type":"response.created","response":{"id":"g1","model":"grok-4","status":"in_progress","output":[]}}`,
+		`{"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"from "}`,
+		`{"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"grok"}`,
+		`{"type":"response.completed","response":{"id":"g1","model":"grok-4","status":"completed","output":[],
+			"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}`,
 	} {
-		fmt.Fprintf(w, "data: %s\n\n", chunk)
+		var head struct{ Type string }
+		_ = json.Unmarshal([]byte(event), &head)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", head.Type, strings.ReplaceAll(event, "\n\t\t\t", ""))
+		w.(http.Flusher).Flush()
+	}
+}
+
+func claudeStream(w http.ResponseWriter, _ *http.Request, _ []byte) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	for _, event := range []string{
+		`{"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5","content":[],"usage":{"input_tokens":3,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"from claude"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`,
+		`{"type":"message_stop"}`,
+	} {
+		var head struct{ Type string }
+		_ = json.Unmarshal([]byte(event), &head)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", head.Type, event)
 		w.(http.Flusher).Flush()
 	}
 }
@@ -166,10 +186,11 @@ func TestFailsOverFromRateLimitedClaudeToGrok(t *testing.T) {
 		t.Error("client key leaked upstream")
 	}
 	g := grok.calls()[0]
-	if g.path != "/v1/chat/completions" || g.header.Get("Authorization") != "Bearer xai-grok" {
+	if g.path != "/v1/responses" || g.header.Get("Authorization") != "Bearer xai-grok" {
 		t.Errorf("grok got path %s auth %q", g.path, g.header.Get("Authorization"))
 	}
-	if g.body["model"] != "grok-4" || g.body["stream"] != true || g.body["context_management"] != nil {
+	if g.body["model"] != "grok-4" || g.body["stream"] != true || g.body["store"] != false ||
+		g.body["context_management"] != nil {
 		t.Errorf("grok body = %s", g.raw)
 	}
 
@@ -359,8 +380,14 @@ func TestGrokAuthFileUsesSessionHeaders(t *testing.T) {
 func TestGrokAPIKeyStaysBearer(t *testing.T) {
 	grok := newFake(t, grokStream)
 	srv, _ := newProxy(t, poolYAML("", grokUp(grok.URL)), "")
-	call(t, "POST", srv.URL+"/v1/chat/completions", "tp-alice-0123456789",
-		`{"model":"grok-4","messages":[{"role":"user","content":"hi"}]}`)
+	body := `{"model":"grok-4","input":"hi","stream":true,"previous_response_id":"g0"}`
+	res, got := call(t, "POST", srv.URL+"/v1/responses", "tp-alice-0123456789", body)
+	if res.StatusCode != 200 || !strings.Contains(got, "event: response.completed") {
+		t.Fatalf("status %d body %s", res.StatusCode, got)
+	}
+	if c := grok.calls()[0]; c.path != "/v1/responses" || c.raw != body {
+		t.Errorf("grok got %s %s", c.path, c.raw)
+	}
 	h := grok.calls()[0].header
 	if h.Get("Authorization") != "Bearer xai-grok" || h.Get("X-XAI-Token-Auth") != "" || h.Get("X-Grok-Model-Override") != "" ||
 		h.Get("X-Grok-Client-Version") != "" {
@@ -404,32 +431,63 @@ func TestPassthroughKeepsTheRequestIntact(t *testing.T) {
 	}
 }
 
-func TestOpenAIClientReachesClaude(t *testing.T) {
+func TestResponsesClientReachesClaude(t *testing.T) {
 	claude := newFake(t, claudeMessage)
 	srv, _ := newProxy(t, poolYAML("", claudeUp(claude.URL)), "")
-	res, body := call(t, "POST", srv.URL+"/v1/chat/completions", "",
-		`{"model":"claude-sonnet-5","messages":[{"role":"system","content":"sys"},{"role":"user","content":"hi"}]}`,
+	res, body := call(t, "POST", srv.URL+"/v1/responses", "",
+		`{"model":"claude-sonnet-5","instructions":"sys","input":"hi"}`,
 		"Authorization", "Bearer tp-alice-0123456789")
 	if res.StatusCode != 200 {
 		t.Fatalf("status %d: %s", res.StatusCode, body)
 	}
 	var out struct {
-		Object  string `json:"object"`
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
-		} `json:"choices"`
+		Object string `json:"object"`
+		Status string `json:"status"`
+		Output []struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
 	}
-	if err := json.Unmarshal([]byte(body), &out); err != nil || out.Object != "chat.completion" ||
-		out.Choices[0].Message.Content != "from claude" || out.Choices[0].FinishReason != "stop" {
+	if err := json.Unmarshal([]byte(body), &out); err != nil || out.Object != "response" || out.Status != "completed" ||
+		len(out.Output) != 1 || out.Output[0].Content[0].Text != "from claude" {
 		t.Errorf("response = %s", body)
 	}
 	c := claude.calls()[0]
 	if c.path != "/v1/messages" || c.body["system"] != "sys" || c.body["max_tokens"] != 8192.0 ||
 		c.header.Get("Anthropic-Version") != "2023-06-01" {
 		t.Errorf("claude got %s %s", c.path, c.raw)
+	}
+
+	claude.setReply(claudeStream)
+	res, body = call(t, "POST", srv.URL+"/v1/responses", "tp-alice-0123456789",
+		`{"model":"claude-sonnet-5","input":"hi","stream":true}`)
+	if res.StatusCode != 200 || res.Header.Get("Content-Type") != "text/event-stream" ||
+		!strings.Contains(body, `"delta":"from claude"`) || !strings.Contains(body, "event: response.completed") {
+		t.Errorf("stream: status %d body %s", res.StatusCode, body)
+	}
+}
+
+// A request that continues a stored response skips Messages API upstreams,
+// which cannot see it.
+func TestStatefulRequestSkipsClaude(t *testing.T) {
+	claude := newFake(t, claudeMessage)
+	grok := newFake(t, grokStream)
+	srv, _ := newProxy(t, poolYAML("", claudeUp(claude.URL), grokUp(grok.URL)), "")
+	stateful := `{"model":"grok-4","previous_response_id":"g0","input":"more","stream":true}`
+	res, body := call(t, "POST", srv.URL+"/v1/responses", "tp-alice-0123456789", stateful)
+	if res.StatusCode != 200 || res.Header.Get("X-Tokenpool-Upstream") != "grok" || len(claude.calls()) != 0 {
+		t.Errorf("status %d upstream %q claude calls %d: %s", res.StatusCode,
+			res.Header.Get("X-Tokenpool-Upstream"), len(claude.calls()), body)
+	}
+
+	srv, p := newProxy(t, poolYAML("", claudeUp(claude.URL)), "")
+	res, body = call(t, "POST", srv.URL+"/v1/responses", "tp-alice-0123456789", stateful)
+	if res.StatusCode != 503 || !strings.Contains(body, "stored response") || len(claude.calls()) != 0 {
+		t.Errorf("claude only: status %d body %s", res.StatusCode, body)
+	}
+	if st, _ := p.Get("claude"); st.State != "available" {
+		t.Errorf("claude benched for a stateful request: %+v", st)
 	}
 }
 
@@ -446,7 +504,7 @@ func TestEveryUpstreamLimited(t *testing.T) {
 		t.Errorf("body = %s", body)
 	}
 	// While both cool down, nothing is sent upstream.
-	res, _ = call(t, "POST", srv.URL+"/v1/chat/completions", "tp-alice-0123456789", `{"model":"x","messages":[]}`)
+	res, _ = call(t, "POST", srv.URL+"/v1/responses", "tp-alice-0123456789", `{"model":"x","input":[]}`)
 	if res.StatusCode != 429 || len(claude.calls())+len(grok.calls()) != 2 {
 		t.Errorf("status %d, calls %d", res.StatusCode, len(claude.calls())+len(grok.calls()))
 	}
@@ -464,8 +522,8 @@ func TestBadRequestIsNotRetried(t *testing.T) {
 	if res.StatusCode != 400 || !strings.Contains(body, "max_tokens: required") || len(grok.calls()) != 0 {
 		t.Errorf("status %d body %s grok calls %d", res.StatusCode, body, len(grok.calls()))
 	}
-	// An OpenAI client gets the same rejection in OpenAI shape.
-	res, body = call(t, "POST", srv.URL+"/v1/chat/completions", "tp-alice-0123456789", `{"model":"m","messages":[]}`)
+	// A Responses client gets the same rejection in OpenAI shape.
+	res, body = call(t, "POST", srv.URL+"/v1/responses", "tp-alice-0123456789", `{"model":"m","input":[]}`)
 	if res.StatusCode != 400 || !strings.Contains(body, `"error":{"code":null,"message":"claude: max_tokens: required"`) {
 		t.Errorf("status %d body %s", res.StatusCode, body)
 	}
@@ -524,8 +582,8 @@ func TestMaxTokensCap(t *testing.T) {
 		fmt.Sprintf("  - {name: small, url: %q, format: openai, token: t, max_tokens: 2048}\n", grok.URL+"/v1")), "")
 	call(t, "POST", srv.URL+"/v1/messages", "tp-alice-0123456789",
 		`{"model":"m","max_tokens":64000,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	if got := grok.calls()[0].body["max_tokens"]; got != 2048.0 {
-		t.Errorf("max_tokens = %v", got)
+	if got := grok.calls()[0].body["max_output_tokens"]; got != 2048.0 {
+		t.Errorf("max_output_tokens = %v", got)
 	}
 }
 
@@ -614,9 +672,10 @@ func TestUpstreamURL(t *testing.T) {
 		{"https://api.anthropic.com", config.Anthropic, kindMessages, "https://api.anthropic.com/v1/messages"},
 		{"https://api.anthropic.com/v1/", config.Anthropic, kindCountTokens, "https://api.anthropic.com/v1/messages/count_tokens"},
 		{"https://gw.corp/anthropic/v1/messages", config.Anthropic, kindMessages, "https://gw.corp/anthropic/v1/messages"},
-		{"https://api.x.ai/v1", config.OpenAI, kindChat, "https://api.x.ai/v1/chat/completions"},
-		{"https://api.x.ai", config.OpenAI, kindChat, "https://api.x.ai/v1/chat/completions"},
-		{"http://gateway.example.com:8000/openai/v1/chat/completions", config.OpenAI, kindChat, "http://gateway.example.com:8000/openai/v1/chat/completions"},
+		{"https://api.x.ai/v1", config.OpenAI, kindResponses, "https://api.x.ai/v1/responses"},
+		{"https://api.x.ai", config.OpenAI, kindResponses, "https://api.x.ai/v1/responses"},
+		{"https://cli-chat-proxy.grok.com/v1/", config.OpenAI, kindMessages, "https://cli-chat-proxy.grok.com/v1/responses"},
+		{"http://gateway.example.com:8000/openai/v1/responses", config.OpenAI, kindResponses, "http://gateway.example.com:8000/openai/v1/responses"},
 	}
 	for _, tt := range tests {
 		got := upstreamURL(config.Upstream{URL: tt.url, Format: tt.format}, tt.k, "")

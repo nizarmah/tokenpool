@@ -34,12 +34,12 @@ type kind int
 const (
 	kindMessages    kind = iota // POST /v1/messages
 	kindCountTokens             // POST /v1/messages/count_tokens
-	kindChat                    // POST /v1/chat/completions
+	kindResponses               // POST /v1/responses
 )
 
 // format is the API the client speaks on this endpoint.
 func (k kind) format() config.Format {
-	if k == kindChat {
+	if k == kindResponses {
 		return config.OpenAI
 	}
 	return config.Anthropic
@@ -90,8 +90,8 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("POST /v1/messages", s.withClient(config.Anthropic, s.serve(kindMessages)))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.withClient(config.Anthropic, s.countTokens))
-	mux.HandleFunc("POST /v1/chat/completions", s.withClient(config.OpenAI, s.serve(kindChat)))
-	mux.HandleFunc("POST /chat/completions", s.withClient(config.OpenAI, s.serve(kindChat)))
+	mux.HandleFunc("POST /v1/responses", s.withClient(config.OpenAI, s.serve(kindResponses)))
+	mux.HandleFunc("POST /responses", s.withClient(config.OpenAI, s.serve(kindResponses)))
 	mux.HandleFunc("GET /v1/models", s.withClient(config.OpenAI, s.models))
 	if s.cfg.AdminKey != "" {
 		s.adminRoutes(mux)
@@ -146,15 +146,8 @@ func clientName(ctx context.Context) string {
 
 // requestHead is the part of a request body the proxy itself needs.
 type requestHead struct {
-	Model         string `json:"model"`
-	Stream        bool   `json:"stream"`
-	StreamOptions *struct {
-		IncludeUsage bool `json:"include_usage"`
-	} `json:"stream_options"`
-}
-
-func (h requestHead) includeUsage() bool {
-	return h.StreamOptions != nil && h.StreamOptions.IncludeUsage
+	Model  string `json:"model"`
+	Stream bool   `json:"stream"`
 }
 
 func (s *Server) readRequest(w http.ResponseWriter, r *http.Request, in config.Format) ([]byte, requestHead, bool) {
@@ -208,6 +201,12 @@ func (s *Server) serve(k kind) http.HandlerFunc {
 				if errors.As(err, &bad) {
 					writeError(w, in, http.StatusBadRequest, "tokenpool: "+bad.Error())
 					return
+				}
+				if errors.Is(err, translate.ErrStateful) {
+					log.Info("skipping", "upstream", c.Name, "reason", err.Error())
+					failures = append(failures, c.Name+": "+err.Error())
+					allLimits = false
+					continue
 				}
 				reason := "unreachable: " + err.Error()
 				var tokErr tokenError
@@ -325,6 +324,9 @@ func (e badRequestError) Unwrap() error { return e.err }
 // send makes one attempt against one upstream.
 func (s *Server) send(r *http.Request, k kind, c pool.Candidate, body []byte) (*http.Response, error) {
 	upBody, err := s.upstreamBody(k, c, body)
+	if errors.Is(err, translate.ErrStateful) {
+		return nil, err
+	}
 	if err != nil {
 		return nil, badRequestError{err}
 	}
@@ -349,9 +351,9 @@ func (s *Server) upstreamBody(k kind, c pool.Candidate, body []byte) ([]byte, er
 	var err error
 	switch in := k.format(); {
 	case in == config.Anthropic && c.Format == config.OpenAI:
-		body, err = translate.AnthropicToOpenAI(body)
+		body, err = translate.AnthropicToResponses(body)
 	case in == config.OpenAI && c.Format == config.Anthropic:
-		body, err = translate.OpenAIToAnthropic(body, s.cfg.DefaultMaxTokens)
+		body, err = translate.ResponsesToAnthropic(body, s.cfg.DefaultMaxTokens)
 	}
 	if err != nil {
 		return nil, err
@@ -373,11 +375,11 @@ func upstreamURL(u config.Upstream, k kind, query string) string {
 			path += "/count_tokens"
 		}
 	} else {
-		base = strings.TrimSuffix(base, "/chat/completions")
+		base = strings.TrimSuffix(base, "/responses")
 		if parsed, err := url.Parse(base); err == nil && parsed.Path == "" {
 			base += "/v1"
 		}
-		path = "/chat/completions"
+		path = "/responses"
 	}
 	if query != "" {
 		path += "?" + query
@@ -502,18 +504,18 @@ func (s *Server) writeSuccess(w http.ResponseWriter, res *http.Response, k kind,
 		h.Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)
 		if in == config.Anthropic {
-			return translate.OpenAIStreamToAnthropic(w, flusher(w), res.Body, c.UpstreamModel)
+			return translate.ResponsesStreamToAnthropic(w, flusher(w), res.Body, c.UpstreamModel)
 		}
-		return translate.AnthropicStreamToOpenAI(w, flusher(w), res.Body, head.includeUsage())
+		return translate.AnthropicStreamToResponses(w, flusher(w), res.Body)
 	}
 	upstream, err := io.ReadAll(res.Body)
 	if err != nil {
 		writeError(w, in, http.StatusBadGateway, fmt.Sprintf("tokenpool: reading %s: %v", c.Name, err))
 		return err
 	}
-	convert := translate.AnthropicResponseToOpenAI
+	convert := translate.AnthropicResponseToResponses
 	if in == config.Anthropic {
-		convert = translate.OpenAIResponseToAnthropic
+		convert = translate.ResponsesResponseToAnthropic
 	}
 	out, err := convert(upstream)
 	if err != nil {
