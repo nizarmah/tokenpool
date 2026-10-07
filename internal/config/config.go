@@ -22,7 +22,7 @@ type Format string
 const (
 	// Anthropic is the Messages API: POST {url}/v1/messages.
 	Anthropic Format = "anthropic"
-	// OpenAI is the Chat Completions API: POST {url}/chat/completions.
+	// OpenAI is the Responses API: POST {url}/responses.
 	OpenAI Format = "openai"
 )
 
@@ -94,8 +94,8 @@ type Config struct {
 	AdminKey string `yaml:"admin_key"`
 	// PoolFile stores upstreams added through the admin API.
 	PoolFile string `yaml:"pool_file"`
-	// DefaultMaxTokens fills max_tokens when an OpenAI request goes to an
-	// Anthropic upstream without one (Anthropic requires it).
+	// DefaultMaxTokens fills max_tokens when a Responses request without
+	// max_output_tokens goes to an Anthropic upstream (Anthropic requires it).
 	DefaultMaxTokens int           `yaml:"default_max_tokens"`
 	MaxBodyBytes     int64         `yaml:"max_body_bytes"`
 	ConnectTimeout   time.Duration `yaml:"connect_timeout"`
@@ -267,6 +267,9 @@ func (u Upstream) Validate() error {
 	}
 	if u.Format != Anthropic && u.Format != OpenAI {
 		return fmt.Errorf("upstream %q: format must be anthropic or openai, got %q", u.Name, u.Format)
+	}
+	if u.Format == OpenAI && strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/chat/completions") {
+		return fmt.Errorf("upstream %q: openai upstreams speak the Responses API: set url to the API base, without /chat/completions", u.Name)
 	}
 	if isPlaceholder(u.Token) {
 		return fmt.Errorf("upstream %q: token is still a placeholder: replace %s with the real key", u.Name, u.Token)

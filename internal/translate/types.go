@@ -1,6 +1,6 @@
 // Package translate converts requests, responses and streams between the
-// Anthropic Messages API and the OpenAI Chat Completions API, so one client
-// can fail over between upstreams that speak different APIs.
+// Anthropic Messages API and the OpenAI Responses API, so one client can
+// fail over between upstreams that speak different APIs.
 package translate
 
 import (
@@ -144,129 +144,121 @@ type anthropicOutMessage struct {
 // obj is a JSON object we build field by field, so empty strings survive.
 type obj = map[string]any
 
-// ---- OpenAI Chat Completions API ----
+// ---- OpenAI Responses API ----
 
-type openaiRequest struct {
-	Model               string          `json:"model"`
-	Messages            []openaiMessage `json:"messages"`
-	MaxTokens           *int            `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int            `json:"max_completion_tokens,omitempty"`
-	Temperature         *float64        `json:"temperature,omitempty"`
-	TopP                *float64        `json:"top_p,omitempty"`
-	Stop                json.RawMessage `json:"stop,omitempty"`
-	Stream              bool            `json:"stream,omitempty"`
-	Tools               []openaiTool    `json:"tools,omitempty"`
-	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
-	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
-	User                string          `json:"user,omitempty"`
+type responsesRequest struct {
+	Model              string          `json:"model"`
+	Instructions       string          `json:"instructions,omitempty"`
+	Input              json.RawMessage `json:"input"`
+	MaxOutputTokens    *int            `json:"max_output_tokens,omitempty"`
+	Temperature        *float64        `json:"temperature,omitempty"`
+	TopP               *float64        `json:"top_p,omitempty"`
+	Stream             bool            `json:"stream,omitempty"`
+	Tools              []responsesTool `json:"tools,omitempty"`
+	ToolChoice         json.RawMessage `json:"tool_choice,omitempty"`
+	ParallelToolCalls  *bool           `json:"parallel_tool_calls,omitempty"`
+	User               string          `json:"user,omitempty"`
+	SafetyIdentifier   string          `json:"safety_identifier,omitempty"`
+	PreviousResponseID string          `json:"previous_response_id,omitempty"`
+	Conversation       json.RawMessage `json:"conversation,omitempty"`
 }
 
-type openaiMessage struct {
-	Role       string           `json:"role"`
-	Content    json.RawMessage  `json:"content"`
-	ToolCalls  []openaiToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string           `json:"tool_call_id,omitempty"`
+// responsesItem is one input or output item: a message, a function call,
+// a function call's output, or a kind tokenpool skips.
+type responsesItem struct {
+	Type      string          `json:"type"`
+	ID        string          `json:"id,omitempty"`
+	Role      string          `json:"role,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"` // a string or parts
+	CallID    string          `json:"call_id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Arguments string          `json:"arguments,omitempty"`
+	Output    json.RawMessage `json:"output,omitempty"` // a string or parts
 }
 
-type openaiPart struct {
-	Type     string    `json:"type"`
-	Text     string    `json:"text,omitempty"`
-	ImageURL *imageURL `json:"image_url,omitempty"`
+type responsesPart struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Refusal  string `json:"refusal,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
+	FileData string `json:"file_data,omitempty"`
+	FileURL  string `json:"file_url,omitempty"`
 }
 
-type imageURL struct {
-	URL    string `json:"url"`
-	Detail string `json:"detail,omitempty"`
-}
-
-type openaiTool struct {
-	Type     string         `json:"type"`
-	Function openaiFunction `json:"function"`
-}
-
-type openaiFunction struct {
-	Name        string          `json:"name"`
+type responsesTool struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name,omitempty"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
-type openaiToolCall struct {
-	Index    *int               `json:"index,omitempty"`
-	ID       string             `json:"id,omitempty"`
-	Type     string             `json:"type,omitempty"`
-	Function openaiFunctionCall `json:"function"`
+// responsesOutRequest is what we send to a Responses upstream. Store is
+// always false: the next turn may go to another upstream, so nothing
+// stored would be used.
+type responsesOutRequest struct {
+	Model             string          `json:"model"`
+	Instructions      string          `json:"instructions,omitempty"`
+	Input             []obj           `json:"input"`
+	MaxOutputTokens   *int            `json:"max_output_tokens,omitempty"`
+	Temperature       *float64        `json:"temperature,omitempty"`
+	TopP              *float64        `json:"top_p,omitempty"`
+	Stream            bool            `json:"stream,omitempty"`
+	Store             bool            `json:"store"`
+	Tools             []responsesTool `json:"tools,omitempty"`
+	ToolChoice        any             `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
+	User              string          `json:"user,omitempty"`
 }
 
-type openaiFunctionCall struct {
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments"`
+type responsesResponse struct {
+	ID                string `json:"id"`
+	Model             string `json:"model"`
+	Status            string `json:"status"`
+	IncompleteDetails *struct {
+		Reason string `json:"reason"`
+	} `json:"incomplete_details"`
+	Output []responsesItem  `json:"output"`
+	Usage  *responsesUsage  `json:"usage"`
+	Error  *responsesErrObj `json:"error"`
 }
 
-// openaiOutRequest is what we send to an OpenAI upstream.
-type openaiOutRequest struct {
-	Model             string              `json:"model"`
-	Messages          []openaiOutMessage  `json:"messages"`
-	MaxTokens         *int                `json:"max_tokens,omitempty"`
-	Temperature       *float64            `json:"temperature,omitempty"`
-	TopP              *float64            `json:"top_p,omitempty"`
-	Stop              []string            `json:"stop,omitempty"`
-	Stream            bool                `json:"stream,omitempty"`
-	StreamOptions     *openaiStreamOption `json:"stream_options,omitempty"`
-	Tools             []openaiTool        `json:"tools,omitempty"`
-	ToolChoice        any                 `json:"tool_choice,omitempty"`
-	ParallelToolCalls *bool               `json:"parallel_tool_calls,omitempty"`
-	User              string              `json:"user,omitempty"`
+func (r *responsesResponse) incompleteReason() string {
+	if r.IncompleteDetails == nil {
+		return ""
+	}
+	return r.IncompleteDetails.Reason
 }
 
-type openaiStreamOption struct {
-	IncludeUsage bool `json:"include_usage"`
+type responsesErrObj struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
-type openaiOutMessage struct {
-	Role       string           `json:"role"`
-	Content    any              `json:"content"` // string, []openaiPart or nil
-	ToolCalls  []openaiToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string           `json:"tool_call_id,omitempty"`
+type responsesUsage struct {
+	InputTokens        int `json:"input_tokens"`
+	InputTokensDetails struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"input_tokens_details"`
+	OutputTokens int `json:"output_tokens"`
 }
 
-type openaiResponse struct {
-	ID      string `json:"id"`
-	Model   string `json:"model"`
-	Choices []struct {
-		Message struct {
-			Content   json.RawMessage  `json:"content"`
-			ToolCalls []openaiToolCall `json:"tool_calls"`
-			Refusal   string           `json:"refusal"`
-		} `json:"message"`
-		FinishReason string `json:"finish_reason"`
-	} `json:"choices"`
-	Usage *openaiUsage `json:"usage"`
+// responsesEvent is one Responses stream event. Delta stays raw: most
+// events carry a string there, but not all.
+type responsesEvent struct {
+	Type        string             `json:"type"`
+	Response    *responsesResponse `json:"response"`
+	OutputIndex int                `json:"output_index"`
+	Item        *responsesItem     `json:"item"`
+	Delta       json.RawMessage    `json:"delta"`
+	Arguments   string             `json:"arguments"`
+	Message     string             `json:"message"`
+	Error       *apiError          `json:"error"`
 }
 
-type openaiUsage struct {
-	PromptTokens        int                  `json:"prompt_tokens"`
-	CompletionTokens    int                  `json:"completion_tokens"`
-	TotalTokens         int                  `json:"total_tokens"`
-	PromptTokensDetails *openaiPromptDetails `json:"prompt_tokens_details,omitempty"`
-}
-
-type openaiPromptDetails struct {
-	CachedTokens int `json:"cached_tokens"`
-}
-
-type openaiChunk struct {
-	ID      string `json:"id"`
-	Model   string `json:"model"`
-	Choices []struct {
-		Index int `json:"index"`
-		Delta struct {
-			Content   string           `json:"content"`
-			ToolCalls []openaiToolCall `json:"tool_calls"`
-		} `json:"delta"`
-		FinishReason *string `json:"finish_reason"`
-	} `json:"choices"`
-	Usage *openaiUsage `json:"usage"`
-	Error *apiError    `json:"error"`
+func (e responsesEvent) delta() string {
+	var s string
+	_ = json.Unmarshal(e.Delta, &s)
+	return s
 }
 
 type apiError struct {
@@ -274,8 +266,9 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
-// openaiText extracts the text of OpenAI content: a string or text parts.
-func openaiText(raw json.RawMessage) string {
+// responsesText extracts the text of Responses content: a string or parts.
+// A refusal counts as text.
+func responsesText(raw json.RawMessage) string {
 	if len(raw) == 0 || string(raw) == "null" {
 		return ""
 	}
@@ -283,14 +276,17 @@ func openaiText(raw json.RawMessage) string {
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return s
 	}
-	var parts []openaiPart
+	var parts []responsesPart
 	if err := json.Unmarshal(raw, &parts); err != nil {
 		return ""
 	}
 	var texts []string
 	for _, p := range parts {
-		if p.Type == "text" && p.Text != "" {
+		switch {
+		case p.Text != "" && (p.Type == "input_text" || p.Type == "output_text"):
 			texts = append(texts, p.Text)
+		case p.Type == "refusal" && p.Refusal != "":
+			texts = append(texts, p.Refusal)
 		}
 	}
 	return strings.Join(texts, "\n\n")

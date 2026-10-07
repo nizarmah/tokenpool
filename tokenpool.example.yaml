@@ -40,7 +40,7 @@ cooldowns:
 # An upstream with `fallback: true` only takes traffic once every other
 # upstream is limited or failing.
 # format is the API the upstream speaks: anthropic (Messages API) or
-# openai (Chat Completions); tokenpool translates between them.
+# openai (Responses API); tokenpool translates between them.
 upstreams:
   - name: claude-api-1
     url: https://api.anthropic.com

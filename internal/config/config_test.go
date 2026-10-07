@@ -164,6 +164,7 @@ func TestParseErrors(t *testing.T) {
 		"token and token_file": "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token: t, token_file: /f}]",
 		"token_field alone":    "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token_field: x}]",
 		"placeholder token":    "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token: '<xAI API key>'}]",
+		"chat completions url": "allow_anonymous: true\nupstreams: [{name: a, url: 'https://api.x.ai/v1/chat/completions', format: openai}]",
 	}
 	for name, doc := range tests {
 		t.Run(name, func(t *testing.T) {
