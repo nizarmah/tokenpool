@@ -122,8 +122,13 @@ func TestParseAPIKeyCounters(t *testing.T) {
 	if w := ws["requests"]; w.RemainingPercent != 25 || w.ResetsAt == nil || !w.ResetsAt.Equal(now.Add(6*time.Minute)) {
 		t.Errorf("requests = %+v", w)
 	}
-	if w := ws["tokens"]; w.RemainingPercent != 90 {
+	if w := ws["tokens"]; w.RemainingPercent != 90 || !w.Rate {
 		t.Errorf("tokens = %+v", w)
+	}
+	// Per-minute counters refill too fast to say how much an account has
+	// left, so they are not quota.
+	if pct, _, ok := Remaining(Parse(openai, now), now); ok {
+		t.Errorf("rate counters counted as quota: %v%%", pct)
 	}
 
 	anthropic := header(
@@ -139,6 +144,30 @@ func TestParseAPIKeyCounters(t *testing.T) {
 	}
 	if _, ok := ws["requests"]; ok {
 		t.Error("an unparsable counter should be skipped")
+	}
+}
+
+func TestModelLimitDoesNotExhaustTheUpstream(t *testing.T) {
+	ws := Parse(header(
+		"anthropic-ratelimit-unified-5h-status", "rejected",
+		"anthropic-ratelimit-unified-5h-utilization", "1.0",
+		"anthropic-ratelimit-unified-5h-reset", unix(now.Add(time.Hour)),
+		"anthropic-ratelimit-unified-7d-utilization", "0.4",
+		"anthropic-ratelimit-unified-7d-reset", unix(now.Add(72*time.Hour)),
+		"anthropic-ratelimit-unified-7d_opus-utilization", "1.0",
+		"anthropic-ratelimit-unified-7d_opus-status", "rejected",
+		"anthropic-ratelimit-unified-7d_opus-reset", unix(now.Add(120*time.Hour)),
+	), now)
+	if d, ok := Exhausted(ws, now); !ok || d != time.Hour {
+		t.Errorf("exhausted = %s %v, want 1h (the 5h window, not 7d_opus)", d, ok)
+	}
+	// Only the model limit is used up: nothing blocks the whole upstream.
+	ws = Parse(header(
+		"anthropic-ratelimit-unified-7d_opus-status", "rejected",
+		"anthropic-ratelimit-unified-7d_opus-reset", unix(now.Add(120*time.Hour)),
+	), now)
+	if d, ok := Exhausted(ws, now); ok {
+		t.Errorf("exhausted = %s, want none", d)
 	}
 }
 
