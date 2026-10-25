@@ -45,9 +45,10 @@ type Upstream struct {
 	// top-level access_token, accessToken or token.
 	TokenField string `yaml:"token_field,omitempty" json:"token_field,omitempty"`
 	// Auth says how the token is sent: x-api-key, bearer, setup-token, grok,
-	// header:<Name> or none. Defaults to x-api-key for an Anthropic API key,
-	// setup-token for a Claude Code setup-token (sk-ant-oat…), grok when
-	// token_file is a Grok ~/.grok/auth.json, and bearer otherwise.
+	// chatgpt, header:<Name> or none. Defaults to x-api-key for an Anthropic
+	// API key, setup-token for a Claude Code setup-token (sk-ant-oat…), grok
+	// when token_file is a Grok ~/.grok/auth.json, chatgpt when it is a Codex
+	// CLI auth.json with a ChatGPT login, and bearer otherwise.
 	Auth string `yaml:"auth,omitempty" json:"auth,omitempty"`
 	// Model, when set, replaces the requested model for every request.
 	// With Models set, it covers models that match no pattern.
@@ -83,8 +84,18 @@ type Cooldowns struct {
 // Config is the whole tokenpool configuration file.
 type Config struct {
 	Listen string `yaml:"listen"`
-	// Strategy picks among upstreams of equal priority: failover or round_robin.
+	// Strategy orders the upstreams that can serve a request: priority
+	// (also "failover"), round_robin, default or most_quota.
 	Strategy string `yaml:"strategy"`
+	// DefaultUpstream is the upstream the default strategy sends traffic
+	// to first.
+	DefaultUpstream string `yaml:"default_upstream"`
+	// PinModels keeps every request on upstreams that serve the requested
+	// model as is, unless the request sends x-tokenpool-pin: false.
+	PinModels bool `yaml:"pin_models"`
+	// ModelAliases maps a name clients can ask for to a real model, such
+	// as best-code: gpt-5-codex.
+	ModelAliases map[string]string `yaml:"model_aliases"`
 	// ClientKeys maps a caller's name (a person or an app) to the key it
 	// calls tokenpool with.
 	ClientKeys map[string]string `yaml:"client_keys"`
@@ -165,8 +176,13 @@ func (c *Config) applyDefaults() {
 	if c.Listen == "" {
 		c.Listen = ":8080"
 	}
-	if c.Strategy == "" {
-		c.Strategy = "failover"
+	if canonical, ok := NormalizeStrategy(c.Strategy); ok {
+		c.Strategy = canonical
+	}
+	for i, u := range c.Upstreams {
+		if u.URL == "" && u.Auth == "chatgpt" {
+			c.Upstreams[i].URL = ChatGPTCodexURL
+		}
 	}
 	if c.DefaultMaxTokens == 0 {
 		c.DefaultMaxTokens = 8192
@@ -196,8 +212,22 @@ func setDefault(d *time.Duration, v time.Duration) {
 }
 
 func (c *Config) validate() error {
-	if c.Strategy != "failover" && c.Strategy != "round_robin" {
-		return fmt.Errorf("strategy must be failover or round_robin, got %q", c.Strategy)
+	if _, ok := NormalizeStrategy(c.Strategy); !ok {
+		return fmt.Errorf("strategy must be priority, round_robin, default or most_quota, got %q", c.Strategy)
+	}
+	if c.DefaultUpstream != "" && !namePattern.MatchString(c.DefaultUpstream) {
+		return fmt.Errorf("default_upstream %q is not an upstream name", c.DefaultUpstream)
+	}
+	for alias, target := range c.ModelAliases {
+		switch {
+		case strings.TrimSpace(alias) == "" || strings.TrimSpace(target) == "":
+			return fmt.Errorf("model_aliases: %q: an alias and its model must both be set", alias)
+		case strings.Contains(alias, "*"):
+			return fmt.Errorf("model_aliases: %q: an alias can't hold a wildcard", alias)
+		}
+		if _, chained := c.ModelAliases[target]; chained && target != alias {
+			return fmt.Errorf("model_aliases: %q points at another alias, %q: name the model", alias, target)
+		}
 	}
 	if len(c.ClientKeys) == 0 && !c.AllowAnonymous {
 		return errors.New("no client_keys: add one per person or app (tokenpool keygen), " +
@@ -297,14 +327,50 @@ func (u Upstream) Validate() error {
 		if u.Format != OpenAI {
 			return fmt.Errorf("upstream %q: auth grok is only for openai upstreams", u.Name)
 		}
+	case auth == "chatgpt":
+		if u.Format != OpenAI {
+			return fmt.Errorf("upstream %q: auth chatgpt is only for openai upstreams", u.Name)
+		}
+		if u.TokenFile == "" {
+			return fmt.Errorf("upstream %q: auth chatgpt needs token_file: the Codex CLI's auth.json", u.Name)
+		}
 	case strings.HasPrefix(auth, "header:") && len(auth) > len("header:"):
 	default:
-		return fmt.Errorf("upstream %q: auth must be x-api-key, bearer, setup-token, grok, header:<Name> or none, got %q", u.Name, auth)
+		return fmt.Errorf("upstream %q: auth must be x-api-key, bearer, setup-token, grok, chatgpt, header:<Name> or none, got %q", u.Name, auth)
 	}
 	if u.MaxTokens < 0 {
 		return fmt.Errorf("upstream %q: max_tokens must not be negative", u.Name)
 	}
 	return nil
+}
+
+// ChatGPTCodexURL is where the Codex CLI sends a ChatGPT login's requests,
+// and the url an upstream with auth: chatgpt gets when it sets none.
+const ChatGPTCodexURL = "https://chatgpt.com/backend-api/codex"
+
+// NormalizeStrategy returns the canonical name of a strategy (priority,
+// round_robin, default or most_quota), accepting "failover", hyphens and
+// an empty value (priority), and false for an unknown one.
+func NormalizeStrategy(s string) (string, bool) {
+	switch strings.ReplaceAll(strings.ToLower(strings.TrimSpace(s)), "-", "_") {
+	case "", "priority", "failover":
+		return "priority", true
+	case "round_robin":
+		return "round_robin", true
+	case "default":
+		return "default", true
+	case "most_quota":
+		return "most_quota", true
+	}
+	return "", false
+}
+
+// ResolveModel returns the model an alias stands for, or model itself.
+func (c *Config) ResolveModel(model string) string {
+	if target, ok := c.ModelAliases[model]; ok {
+		return target
+	}
+	return model
 }
 
 // oauthBeta is the Anthropic beta an OAuth setup-token has to be sent with.

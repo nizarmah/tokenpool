@@ -58,7 +58,7 @@ upstreams:
 	if cfg.Cooldowns.RateLimit != 2*time.Minute || cfg.Cooldowns.Quota != time.Hour {
 		t.Errorf("cooldowns = %+v", cfg.Cooldowns)
 	}
-	if cfg.Listen != ":8080" || cfg.Strategy != "failover" || cfg.DefaultMaxTokens != 8192 {
+	if cfg.Listen != ":8080" || cfg.Strategy != "priority" || cfg.DefaultMaxTokens != 8192 {
 		t.Errorf("defaults not applied: %+v", cfg)
 	}
 	if cfg.Upstreams[0].AuthStyle() != "x-api-key" || cfg.Upstreams[1].AuthStyle() != "bearer" {
@@ -165,6 +165,12 @@ func TestParseErrors(t *testing.T) {
 		"token_field alone":    "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token_field: x}]",
 		"placeholder token":    "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token: '<xAI API key>'}]",
 		"chat completions url": "allow_anonymous: true\nupstreams: [{name: a, url: 'https://api.x.ai/v1/chat/completions', format: openai}]",
+		"chatgpt on anthropic": "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: anthropic, auth: chatgpt, token_file: /f}]",
+		"chatgpt inline token": "allow_anonymous: true\nupstreams: [{name: a, format: openai, auth: chatgpt, token: t}]",
+		"bad default name":     "allow_anonymous: true\ndefault_upstream: 'a b'",
+		"empty alias":          "allow_anonymous: true\nmodel_aliases: {best: ''}",
+		"wildcard alias":       "allow_anonymous: true\nmodel_aliases: {'best-*': gpt-5}",
+		"chained alias":        "allow_anonymous: true\nmodel_aliases: {best: fast, fast: gpt-5}",
 	}
 	for name, doc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -172,6 +178,42 @@ func TestParseErrors(t *testing.T) {
 				t.Errorf("Parse(%q) succeeded, want error", doc)
 			}
 		})
+	}
+}
+
+func TestRoutingSettings(t *testing.T) {
+	cfg, err := Parse([]byte(`
+allow_anonymous: true
+strategy: most-quota
+default_upstream: codex
+pin_models: true
+model_aliases:
+  best-code: gpt-5-codex
+upstreams:
+  - name: codex
+    format: openai
+    auth: chatgpt
+    token_file: /secrets/codex/auth.json
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Strategy != "most_quota" || cfg.DefaultUpstream != "codex" || !cfg.PinModels {
+		t.Errorf("routing = %q %q %v", cfg.Strategy, cfg.DefaultUpstream, cfg.PinModels)
+	}
+	if got := cfg.ResolveModel("best-code"); got != "gpt-5-codex" {
+		t.Errorf("alias = %q", got)
+	}
+	if got := cfg.ResolveModel("claude-opus-5"); got != "claude-opus-5" {
+		t.Errorf("non-alias = %q", got)
+	}
+	if u := cfg.Upstreams[0]; u.URL != ChatGPTCodexURL || u.AuthStyle() != "chatgpt" {
+		t.Errorf("chatgpt upstream = %+v", u)
+	}
+	for in, want := range map[string]string{"": "priority", "failover": "priority", "Round-Robin": "round_robin", "default": "default"} {
+		if got, ok := NormalizeStrategy(in); !ok || got != want {
+			t.Errorf("NormalizeStrategy(%q) = %q %v", in, got, ok)
+		}
 	}
 }
 

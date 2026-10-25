@@ -50,18 +50,84 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 		var st pool.Status
 		var err error
 		switch op := r.PathValue("op"); op {
-		case "enable":
+		case "enable", "resume":
 			st, err = s.pool.SetDisabled(name, false)
-		case "disable":
+		case "disable", "pause":
 			st, err = s.pool.SetDisabled(name, true)
 		case "reset":
 			st, err = s.pool.Reset(name)
+		case "default":
+			if err = s.pool.SetDefault(name); err == nil {
+				st, err = s.pool.Get(name)
+			}
+		case "priority":
+			var body struct {
+				Priority *int `json:"priority"`
+			}
+			if !decodeJSON(w, r, &body) {
+				return
+			}
+			if body.Priority == nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": `send {"priority": N}; lower is tried first`})
+				return
+			}
+			st, err = s.pool.SetPriority(name, *body.Priority)
 		default:
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown action " + op + ": use enable, disable or reset"})
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "unknown action " + op + ": use pause, resume, reset, default or priority"})
 			return
 		}
 		s.adminReply(w, r, http.StatusOK, st, err, "upstream "+r.PathValue("op"))
 	}))
+	mux.HandleFunc("GET /admin/status", s.withAdmin(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, s.status())
+	}))
+	setStrategy := s.withAdmin(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Strategy string `json:"strategy"`
+		}
+		if !decodeJSON(w, r, &body) {
+			return
+		}
+		if err := s.pool.SetStrategy(body.Strategy); err != nil {
+			adminError(w, err)
+			return
+		}
+		s.log.Info("strategy changed", "strategy", body.Strategy, "by", "admin", "remote", r.RemoteAddr)
+		writeJSON(w, http.StatusOK, s.status())
+	})
+	mux.HandleFunc("PUT /admin/strategy", setStrategy)
+	mux.HandleFunc("POST /admin/strategy", setStrategy)
+	mux.HandleFunc("DELETE /admin/default", s.withAdmin(func(w http.ResponseWriter, r *http.Request) {
+		if err := s.pool.SetDefault(""); err != nil {
+			adminError(w, err)
+			return
+		}
+		s.log.Info("default upstream cleared", "by", "admin", "remote", r.RemoteAddr)
+		writeJSON(w, http.StatusOK, s.status())
+	}))
+}
+
+// statusView is GET /admin/status: how the pool routes right now and how
+// much quota each upstream has left, in the order requests try them.
+type statusView struct {
+	pool.Summary
+	PinModels    bool              `json:"pin_models"`
+	ModelAliases map[string]string `json:"model_aliases,omitempty"`
+}
+
+func (s *Server) status() statusView {
+	return statusView{Summary: s.pool.Summarize(), PinModels: s.cfg.PinModels, ModelAliases: s.cfg.ModelAliases}
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return false
+	}
+	return true
 }
 
 func (s *Server) withAdmin(next http.HandlerFunc) http.HandlerFunc {

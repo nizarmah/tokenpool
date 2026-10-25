@@ -6,6 +6,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -179,11 +181,21 @@ func (s *Server) serve(k kind) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		req := s.poolRequest(r, head.Model)
 		log := s.log.With("client", clientName(r.Context()), "api", in, "model", head.Model)
-		sel := s.pool.Pick(head.Model)
+		if req.Model != head.Model {
+			log = log.With("alias_for", req.Model)
+		}
+		if req.Pinned {
+			log = log.With("pinned", true)
+		}
+		sel := s.pool.PickFor(req)
 		if len(sel.Candidates)+len(sel.Unavailable) == 0 {
-			writeError(w, in, http.StatusNotFound,
-				fmt.Sprintf("tokenpool: no upstream in the pool serves model %q", head.Model))
+			msg := fmt.Sprintf("tokenpool: no upstream in the pool serves model %q", req.Model)
+			if req.Pinned {
+				msg += " as is (the request is pinned: send x-tokenpool-pin: false to allow another model)"
+			}
+			writeError(w, in, http.StatusNotFound, msg)
 			return
 		}
 
@@ -191,7 +203,7 @@ func (s *Server) serve(k kind) http.HandlerFunc {
 		attempted, allLimits := 0, true
 		for _, c := range sel.Candidates {
 			attempted++
-			res, err := s.send(r, k, c, body)
+			res, chatgpt, err := s.sendRefreshing(r, k, c, body, log)
 			if err != nil {
 				if r.Context().Err() != nil {
 					log.Info("client went away", "upstream", c.Name)
@@ -222,9 +234,9 @@ func (s *Server) serve(k kind) http.HandlerFunc {
 
 			if res.StatusCode >= 200 && res.StatusCode < 300 {
 				s.pool.Success(c.Upstream, res.StatusCode)
-				err := s.writeSuccess(w, res, k, c, head)
+				err := s.writeSuccess(w, res, k, c, head, chatgpt)
 				attrs := []any{"upstream", c.Name, "upstream_model", c.UpstreamModel,
-					"fallback", c.Fallback, "status", res.StatusCode, "failovers", attempted - 1,
+					"native", c.Native, "fallback", c.Fallback, "status", res.StatusCode, "failovers", attempted - 1,
 					"duration", time.Since(start).Round(time.Millisecond)}
 				if err != nil {
 					log.Warn("served with errors", append(attrs, "error", err)...)
@@ -260,7 +272,7 @@ func (s *Server) serve(k kind) http.HandlerFunc {
 		}
 
 		status := http.StatusServiceUnavailable
-		if wait := s.pool.Wait(head.Model); wait > 0 {
+		if wait := s.pool.Wait(req); wait > 0 {
 			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds()+0.999)))
 			if allLimits {
 				status = http.StatusTooManyRequests
@@ -279,11 +291,11 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log := s.log.With("client", clientName(r.Context()), "api", "count_tokens", "model", head.Model)
-	for _, c := range s.pool.Pick(head.Model).Candidates {
+	for _, c := range s.pool.PickFor(s.poolRequest(r, head.Model)).Candidates {
 		if c.Format != config.Anthropic {
 			continue
 		}
-		res, err := s.send(r, kindCountTokens, c, body)
+		res, _, err := s.send(r, kindCountTokens, c, body)
 		if err != nil {
 			if r.Context().Err() != nil {
 				return
@@ -292,7 +304,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if res.StatusCode >= 200 && res.StatusCode < 300 {
-			_ = s.writeSuccess(w, res, kindCountTokens, c, head)
+			_ = s.writeSuccess(w, res, kindCountTokens, c, head, false)
 			return
 		}
 		errBody, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -321,18 +333,51 @@ type badRequestError struct{ err error }
 func (e badRequestError) Error() string { return e.err.Error() }
 func (e badRequestError) Unwrap() error { return e.err }
 
-// send makes one attempt against one upstream.
-func (s *Server) send(r *http.Request, k kind, c pool.Candidate, body []byte) (*http.Response, error) {
-	upBody, err := s.upstreamBody(k, c, body)
-	if errors.Is(err, translate.ErrStateful) {
-		return nil, err
+// pinHeader lets a request choose, per call, whether it may be served by
+// an upstream that swaps its model for another (see Config.PinModels).
+const pinHeader = "X-Tokenpool-Pin"
+
+// poolRequest reads what the pool needs from a request: the model after
+// aliases, and whether it is pinned to that model.
+func (s *Server) poolRequest(r *http.Request, model string) pool.Request {
+	pinned := s.cfg.PinModels
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get(pinHeader))) {
+	case "true", "1", "yes", "on":
+		pinned = true
+	case "false", "0", "no", "off":
+		pinned = false
 	}
-	if err != nil {
-		return nil, badRequestError{err}
+	return pool.Request{Model: s.cfg.ResolveModel(model), Pinned: pinned}
+}
+
+// sendRefreshing sends one attempt and, when a ChatGPT login's access
+// token is rejected, refreshes it and tries the same upstream once more.
+func (s *Server) sendRefreshing(r *http.Request, k kind, c pool.Candidate, body []byte, log *slog.Logger) (*http.Response, bool, error) {
+	res, chatgpt, err := s.send(r, k, c, body)
+	if err != nil || res.StatusCode != http.StatusUnauthorized || !chatgpt {
+		return res, chatgpt, err
 	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1<<20))
+	res.Body.Close()
+	log.Info("access token rejected; refreshing the login", "upstream", c.Name)
+	c.InvalidateToken()
+	return s.send(r, k, c, body)
+}
+
+// send makes one attempt against one upstream. chatgpt reports whether
+// the credential was a ChatGPT login.
+func (s *Server) send(r *http.Request, k kind, c pool.Candidate, body []byte) (res *http.Response, chatgpt bool, err error) {
 	cred, err := c.Credential()
 	if err != nil {
-		return nil, tokenError{err}
+		return nil, false, tokenError{err}
+	}
+	chatgpt = c.IsChatGPT(cred)
+	upBody, err := s.upstreamBody(k, c, body, chatgpt)
+	if errors.Is(err, translate.ErrStateful) {
+		return nil, chatgpt, err
+	}
+	if err != nil {
+		return nil, chatgpt, badRequestError{err}
 	}
 	query := ""
 	if k.format() == c.Format {
@@ -341,13 +386,17 @@ func (s *Server) send(r *http.Request, k kind, c pool.Candidate, body []byte) (*
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
 		upstreamURL(c.Upstream.Upstream, k, query), bytes.NewReader(upBody))
 	if err != nil {
-		return nil, err
+		return nil, chatgpt, err
 	}
-	setUpstreamHeaders(req.Header, r.Header, c, k, cred)
-	return s.client.Do(req)
+	setUpstreamHeaders(req.Header, r.Header, c, k, cred, chatgpt)
+	res, err = s.client.Do(req)
+	if err == nil {
+		s.pool.Observe(c.Upstream, res.Header)
+	}
+	return res, chatgpt, err
 }
 
-func (s *Server) upstreamBody(k kind, c pool.Candidate, body []byte) ([]byte, error) {
+func (s *Server) upstreamBody(k kind, c pool.Candidate, body []byte, chatgpt bool) ([]byte, error) {
 	var err error
 	switch in := k.format(); {
 	case in == config.Anthropic && c.Format == config.OpenAI:
@@ -358,7 +407,10 @@ func (s *Server) upstreamBody(k kind, c pool.Candidate, body []byte) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
-	return translate.Rewrite(body, c.UpstreamModel, c.MaxTokens)
+	if body, err = translate.Rewrite(body, c.UpstreamModel, c.MaxTokens); err != nil || !chatgpt {
+		return body, err
+	}
+	return translate.ForChatGPT(body)
 }
 
 // upstreamURL builds the endpoint URL. Anthropic bases follow the Anthropic
@@ -393,12 +445,20 @@ func upstreamURL(u config.Upstream, k kind, query string) string {
 // proxy raises its floor.
 var GrokClientVersion = "1.0.46"
 
-func setUpstreamHeaders(h, in http.Header, c pool.Candidate, k kind, cred pool.Credential) {
+// CodexClientVersion is the Codex CLI version named in the User-Agent
+// sent with a ChatGPT login, as the CLI itself sends it. An upstream's
+// headers can override the whole User-Agent.
+var CodexClientVersion = "0.164.0"
+
+func setUpstreamHeaders(h, in http.Header, c pool.Candidate, k kind, cred pool.Credential, chatgpt bool) {
 	h.Set("Content-Type", "application/json")
 	h.Set("User-Agent", "tokenpool/"+Version)
 	auth := c.AuthFor(cred.Token)
 	if c.Auth == "" && c.Format == config.OpenAI && cred.GrokSession {
 		auth = "grok"
+	}
+	if chatgpt {
+		auth = "chatgpt"
 	}
 	if c.Format == config.Anthropic {
 		version := "2023-06-01"
@@ -413,7 +473,7 @@ func setUpstreamHeaders(h, in http.Header, c pool.Candidate, k kind, cred pool.C
 		h.Set("Anthropic-Version", version)
 	}
 	switch {
-	case auth == "bearer" || auth == "setup-token" || auth == "grok":
+	case auth == "bearer" || auth == "setup-token" || auth == "grok" || auth == "chatgpt":
 		h.Set("Authorization", "Bearer "+cred.Token)
 	case auth == "x-api-key":
 		h.Set("X-Api-Key", cred.Token)
@@ -434,6 +494,18 @@ func setUpstreamHeaders(h, in http.Header, c pool.Candidate, k kind, cred pool.C
 		if c.UpstreamModel != "" {
 			h.Set("X-Grok-Model-Override", c.UpstreamModel)
 		}
+	}
+	if auth == "chatgpt" {
+		// What the Codex CLI sends to the ChatGPT backend
+		// (codex-rs/model-provider and login/src/auth/default_client.rs).
+		if cred.AccountID != "" {
+			h.Set("ChatGPT-Account-ID", cred.AccountID)
+		}
+		h.Set("Originator", "codex_cli_rs")
+		h.Set("User-Agent", fmt.Sprintf("codex_cli_rs/%s (%s; %s) tokenpool/%s",
+			CodexClientVersion, runtime.GOOS, runtime.GOARCH, Version))
+		h.Set("Accept", "text/event-stream")
+		h.Set("Session-Id", newSessionID())
 	}
 	for name, value := range c.Headers {
 		h.Set(name, value)
@@ -488,12 +560,38 @@ func mergeBeta(h http.Header, beta string) {
 
 // writeSuccess relays a 2xx answer, translating it when the upstream
 // speaks a different API than the client.
-func (s *Server) writeSuccess(w http.ResponseWriter, res *http.Response, k kind, c pool.Candidate, head requestHead) error {
+//
+// chatgpt marks a ChatGPT login's answer, which is always a stream (sent
+// as text/plain), whatever the client asked for.
+func (s *Server) writeSuccess(w http.ResponseWriter, res *http.Response, k kind, c pool.Candidate, head requestHead, chatgpt bool) error {
 	defer res.Body.Close()
 	in := k.format()
 	w.Header().Set("X-Tokenpool-Upstream", c.Name)
+	if !head.Stream && k != kindCountTokens && c.Format == config.OpenAI && (chatgpt || isEventStream(res.Header)) {
+		// The upstream streamed although the client did not ask to:
+		// collect the final response.
+		collected, err := translate.CollectResponsesStream(res.Body)
+		if err != nil {
+			writeError(w, in, http.StatusBadGateway, fmt.Sprintf("tokenpool: reading %s: %v", c.Name, err))
+			return err
+		}
+		if in == c.Format {
+			writeJSON(w, res.StatusCode, json.RawMessage(collected))
+			return nil
+		}
+		out, err := translate.ResponsesResponseToAnthropic(collected)
+		if err != nil {
+			writeError(w, in, http.StatusBadGateway, fmt.Sprintf("tokenpool: translating %s: %v", c.Name, err))
+			return err
+		}
+		writeJSON(w, res.StatusCode, json.RawMessage(out))
+		return nil
+	}
 	if in == c.Format {
 		copyHeaders(w.Header(), res.Header)
+		if chatgpt {
+			w.Header().Set("Content-Type", "text/event-stream")
+		}
 		w.WriteHeader(res.StatusCode)
 		return copyBody(w, res.Body)
 	}
@@ -524,6 +622,19 @@ func (s *Server) writeSuccess(w http.ResponseWriter, res *http.Response, k kind,
 	}
 	writeJSON(w, res.StatusCode, json.RawMessage(out))
 	return nil
+}
+
+func isEventStream(h http.Header) bool {
+	return strings.HasPrefix(strings.ToLower(h.Get("Content-Type")), "text/event-stream")
+}
+
+// newSessionID returns a random UUID (version 4).
+func newSessionID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // relayError passes an upstream's rejection to the client in its API shape.
@@ -612,6 +723,11 @@ func (s *Server) models(w http.ResponseWriter, _ *http.Request) {
 		}
 		if u.Model != "" && owner[u.Model] == "" {
 			owner[u.Model] = u.Name
+		}
+	}
+	for alias, target := range s.cfg.ModelAliases {
+		if owner[alias] == "" {
+			owner[alias] = "alias:" + target
 		}
 	}
 	names := make([]string, 0, len(owner))

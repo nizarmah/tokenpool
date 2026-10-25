@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nizarmah/tokenpool/internal/config"
+	"github.com/nizarmah/tokenpool/internal/quota"
 	"github.com/nizarmah/tokenpool/internal/translate"
 )
 
@@ -45,6 +47,9 @@ func classify(status int, h http.Header, body []byte, cd config.Cooldowns, now t
 	wait := func(def time.Duration) time.Duration {
 		d, ok := ResetAfter(h, now)
 		if !ok {
+			d, ok = bodyReset(body, now)
+		}
+		if !ok {
 			d = def
 		}
 		return min(max(d, time.Second), cd.Max)
@@ -65,6 +70,9 @@ func classify(status int, h http.Header, body []byte, cd config.Cooldowns, now t
 		return verdict{bench, cd.Auth, why("forbidden (check the token)"), false}
 	case status == http.StatusNotFound:
 		return verdict{skip, 0, why("not found (check the url and model)"), false}
+	case status == http.StatusBadRequest && modelMissing(body):
+		// The model exists elsewhere in the pool, just not on this upstream.
+		return verdict{skip, 0, why("model not available here"), false}
 	case status == http.StatusRequestTimeout || status >= 500:
 		return verdict{bench, wait(cd.Error), why(fmt.Sprintf("upstream error %d", status)), false}
 	}
@@ -75,6 +83,15 @@ var quotaWords = []string{
 	"credit balance", "insufficient_quota", "insufficient quota", "quota",
 	"billing", "spending limit", "usage limit", "out of credits",
 	"exceeded your", "rate limit", "rate_limit",
+}
+
+// modelMissing spots a 400 that says the upstream lacks the model, such
+// as the Codex backend's "The 'x' model is not supported when using Codex
+// with a ChatGPT account." (code model_not_found).
+func modelMissing(body []byte) bool {
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "model_not_found") ||
+		(strings.Contains(lower, "model") && strings.Contains(lower, "not supported"))
 }
 
 func quotaMessage(body string) bool {
@@ -88,7 +105,9 @@ func quotaMessage(body string) bool {
 }
 
 // ResetAfter reads how long until an upstream accepts requests again from
-// Retry-After or rate-limit reset headers (Anthropic, OpenAI and xAI shapes).
+// Retry-After, the usage limits it reports as exhausted (Claude's 5h and
+// weekly limits, Codex's), or rate-limit reset headers (Anthropic, OpenAI
+// and xAI shapes).
 func ResetAfter(h http.Header, now time.Time) (time.Duration, bool) {
 	if v := h.Get("Retry-After-Ms"); v != "" {
 		if ms, err := strconv.ParseFloat(v, 64); err == nil && ms >= 0 {
@@ -102,6 +121,11 @@ func ResetAfter(h http.Header, now time.Time) (time.Duration, bool) {
 		if t, err := http.ParseTime(v); err == nil {
 			return max(t.Sub(now), 0), true
 		}
+	}
+	// An exhausted usage window (a weekly limit, say) holds the upstream
+	// until it resets, even when a shorter window resets sooner.
+	if d, ok := quota.Exhausted(quota.Parse(h, now), now); ok {
+		return d, true
 	}
 	// A *-reset header paired with a *-remaining of 0 names the exhausted
 	// limit; take the latest such reset. Resets with no remaining counter
@@ -136,26 +160,26 @@ func ResetAfter(h http.Header, now time.Time) (time.Duration, bool) {
 	return 0, false
 }
 
-// parseReset understands RFC 3339 times, Unix timestamps (s or ms),
-// Go durations ("6m0s", "20ms") and plain seconds.
-func parseReset(v string, now time.Time) (time.Duration, bool) {
-	v = strings.TrimSpace(v)
-	if t, err := time.Parse(time.RFC3339, v); err == nil {
-		return max(t.Sub(now), 0), true
+func parseReset(v string, now time.Time) (time.Duration, bool) { return quota.ParseReset(v, now) }
+
+// bodyReset reads when a limit resets from an error body, as the Codex
+// backend reports it: {"error":{"type":"usage_limit_reached",
+// "resets_in_seconds":…, "resets_at":…}}.
+func bodyReset(body []byte, now time.Time) (time.Duration, bool) {
+	var shape struct {
+		Error struct {
+			ResetsInSeconds *float64 `json:"resets_in_seconds"`
+			ResetsAt        *float64 `json:"resets_at"`
+		} `json:"error"`
 	}
-	if n, err := strconv.ParseFloat(v, 64); err == nil {
-		switch {
-		case n > 1e12:
-			return max(time.UnixMilli(int64(n)).Sub(now), 0), true
-		case n > 1e9:
-			return max(time.Unix(int64(n), 0).Sub(now), 0), true
-		case n >= 0:
-			return time.Duration(n * float64(time.Second)), true
-		}
+	if json.Unmarshal(body, &shape) != nil {
 		return 0, false
 	}
-	if d, err := time.ParseDuration(v); err == nil && d >= 0 {
-		return d, true
+	switch e := shape.Error; {
+	case e.ResetsInSeconds != nil && *e.ResetsInSeconds >= 0:
+		return time.Duration(*e.ResetsInSeconds * float64(time.Second)), true
+	case e.ResetsAt != nil && *e.ResetsAt > 0:
+		return max(time.Unix(int64(*e.ResetsAt), 0).Sub(now), 0), true
 	}
 	return 0, false
 }

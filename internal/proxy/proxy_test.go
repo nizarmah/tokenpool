@@ -67,7 +67,8 @@ func newProxy(t *testing.T, yaml string, poolFile string) (*httptest.Server, *po
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := pool.New(cfg.Strategy, cfg.Upstreams, poolFile)
+	p, err := pool.Open(pool.Options{Strategy: cfg.Strategy, Default: cfg.DefaultUpstream,
+		Upstreams: cfg.Upstreams, File: poolFile})
 	if err != nil {
 		t.Fatal(err)
 	}

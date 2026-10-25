@@ -62,7 +62,8 @@ func run(configPath string, check, jsonLogs bool) error {
 	if err != nil {
 		return err
 	}
-	p, err := pool.New(cfg.Strategy, cfg.Upstreams, cfg.PoolFile)
+	p, err := pool.Open(pool.Options{Strategy: cfg.Strategy, Default: cfg.DefaultUpstream,
+		Upstreams: cfg.Upstreams, File: cfg.PoolFile})
 	if err != nil {
 		return err
 	}
@@ -71,6 +72,7 @@ func run(configPath string, check, jsonLogs bool) error {
 		if exposed != "" {
 			fmt.Fprintln(os.Stderr, "warning:", exposed)
 		}
+		fmt.Printf("strategy: %s\n", p.Summarize().Strategy)
 		printPool(os.Stdout, p.List())
 		return nil
 	}
@@ -103,7 +105,7 @@ func run(configPath string, check, jsonLogs bool) error {
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	log.Info("tokenpool listening", "addr", cfg.Listen, "upstreams", len(p.List()),
-		"strategy", cfg.Strategy, "admin_api", cfg.AdminKey != "")
+		"strategy", p.Summarize().Strategy, "admin_api", cfg.AdminKey != "")
 
 	select {
 	case err := <-errc:
@@ -131,7 +133,10 @@ func printPool(w io.Writer, ups []pool.Status) {
 			model = "(as requested)"
 		}
 		role := "primary"
-		if u.Fallback {
+		switch {
+		case u.Default:
+			role = "default"
+		case u.Fallback:
 			role = "fallback"
 		}
 		token := u.Token
