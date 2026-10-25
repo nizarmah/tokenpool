@@ -24,6 +24,24 @@ client_keys:
 admin_key: "<tokenpool keygen output>"
 pool_file: pool.json
 
+# Which upstream goes first:
+#   priority    lowest priority first (the default)
+#   round_robin rotate among upstreams that share a priority
+#   default     default_upstream takes everything it can, then priority
+#   most_quota  whichever upstream has the most quota left right now
+# Switch at runtime with PUT /admin/strategy; that choice is saved to pool_file.
+strategy: priority
+# default_upstream: claude-api-1
+
+# Pinned requests only go to upstreams that serve the requested model as
+# is, never to one that swaps it for another model. Per request, send
+# x-tokenpool-pin: true (or false to override this setting).
+# pin_models: false
+
+# Short names clients can ask for.
+# model_aliases:
+#   best-code: gpt-5-codex
+
 # How long an upstream sits out after a failure, unless the upstream says
 # itself (Retry-After or rate-limit reset headers).
 cooldowns:
@@ -35,8 +53,10 @@ cooldowns:
   max: 24h          # upper bound on any cooldown
 
 # The pool. Each entry is one credential. Add as many as you have: several
-# Console API keys, several `claude setup-token`s, several Grok API keys,
-# a Grok login, or any mix. Requests go to the lowest priority first.
+# Console API keys, several `claude setup-token`s, a Codex ChatGPT login,
+# several Grok API keys, a Grok login, or any mix. Requests go to the
+# lowest priority first; among equals, to upstreams that serve the model
+# natively (`models` entries with an empty value) first.
 # An upstream with `fallback: true` only takes traffic once every other
 # upstream is limited or failing.
 # format is the API the upstream speaks: anthropic (Messages API) or
@@ -59,6 +79,20 @@ upstreams:
     token: "<another Anthropic API key, or a claude setup-token>"
     # auth: setup-token
     priority: 2
+
+  # A ChatGPT plan's Codex quota, through the Codex CLI's login file. Sign
+  # in once with: CODEX_HOME=~/.config/tokenpool/codex codex login --device-auth
+  # tokenpool refreshes the login itself and writes it back to the file, so
+  # give it a login of its own. Using a ChatGPT login through tokenpool is
+  # against OpenAI's terms; do that at your own discretion.
+  # - name: codex-1
+  #   format: openai
+  #   auth: chatgpt
+  #   token_file: ~/.config/tokenpool/codex/auth.json
+  #   priority: 2
+  #   models:
+  #     "gpt-*": ""                # the models your plan lists, natively
+  #     "claude-*": gpt-5-codex    # Claude requests too, by translation
 
   - name: grok-api
     url: https://api.x.ai/v1

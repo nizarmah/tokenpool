@@ -2,11 +2,12 @@
 
 [![ci](https://github.com/nizarmah/tokenpool/actions/workflows/ci.yml/badge.svg)](https://github.com/nizarmah/tokenpool/actions/workflows/ci.yml)
 
-Pool your LLM API keys behind one endpoint. When a key hits its rate limit,
-runs out of credits or its provider goes down, tokenpool sends the request
-to the next upstream instead: another Claude key, Grok, or any API that
-speaks the Anthropic Messages or OpenAI Responses API. The client gets one
-normal answer and never sees the switch.
+Pool your LLM API keys and logins behind one endpoint. When a key hits its
+rate limit, runs out of credits or its provider goes down, tokenpool sends
+the request to the next upstream instead: another Claude key, a Codex
+(ChatGPT) login, Grok, or any API that speaks the Anthropic Messages or
+OpenAI Responses API. The client gets one normal answer and never sees the
+switch.
 
 ```
  Claude Code / SDKs ──► tokenpool ──► claude-primary    (429: back in 3m)
@@ -16,9 +17,9 @@ normal answer and never sees the switch.
 ```
 
 - **Any URL, any credential.** Each upstream is one credential: a Claude
-  Console API key, a Claude Code setup-token, a Grok API key, or a Grok
-  login. List as many as you have. The API it speaks is `anthropic`
-  (Messages) or `openai` (Responses).
+  Console API key, a Claude Code setup-token, a Codex CLI ChatGPT login, a
+  Grok API key, or a Grok login. List as many as you have. The API it
+  speaks is `anthropic` (Messages) or `openai` (Responses).
 - **Both APIs on the front.** Clients call `POST /v1/messages` (Anthropic)
   or `POST /v1/responses` (OpenAI). When the upstream speaks the
   other API, tokenpool translates the request, the response and the stream,
@@ -30,10 +31,17 @@ normal answer and never sees the switch.
   takes traffic while every other upstream is limited or down.
 - **Model mapping.** Clients ask for `claude-sonnet-5`; a Grok upstream
   maps that to a Grok model.
+- **Pick the model.** A request for a model goes to the upstreams that
+  serve it as is first. Pin it (`x-tokenpool-pin: true`) and it never gets
+  swapped for another model. Aliases give models short names.
+- **Quota-aware routing.** tokenpool reads each upstream's remaining quota
+  (Claude's 5-hour and weekly limits, Codex's, API-key counters) from the
+  headers it already sends. Route by priority, to one default upstream, or
+  to whichever upstream has the most quota left right now.
 - **Caller keys.** Every person or app gets its own tokenpool key. Upstream
   keys stay on the server and never reach clients.
-- **Runtime admin API.** Add, update, pause or remove upstreams without a
-  restart.
+- **Runtime admin API.** Add, update, pause or remove upstreams, change
+  priorities, the default and the strategy, without a restart.
 
 One static binary, one YAML file, no database.
 
@@ -244,12 +252,12 @@ xAI API key is the credential those terms allow. Details are under
 | `token`      | The upstream credential: an API key, a Claude Code setup-token, or a Grok session token. |
 | `token_file` | Read the credential from this file instead, re-read whenever the file changes. `~` is your home directory. See [Keys from a file](#keys-from-a-file). |
 | `token_field` | Dot path to the credential inside a JSON `token_file`, such as `tokens.access_token`. For a Grok `auth.json` with several logins, the session name instead. |
-| `auth`       | `x-api-key` (default for an Anthropic API key), `setup-token` (default for a `sk-ant-oat` token), `grok` (default for a Grok `auth.json`), `bearer` (default for other OpenAI-format upstreams), `header:<Name>`, or `none`. |
+| `auth`       | `x-api-key` (default for an Anthropic API key), `setup-token` (default for a `sk-ant-oat` token), `grok` (default for a Grok `auth.json`), `chatgpt` (default for a Codex CLI `auth.json`), `bearer` (default for other OpenAI-format upstreams), `header:<Name>`, or `none`. |
 | `model`      | Replaces the requested model. With `models` set, it covers models that match no pattern. |
-| `models`     | Requested model to upstream model. `*` is a wildcard and the most specific pattern wins. An empty value passes the model through. With `models` set and no `model`, the upstream only serves models that match. |
+| `models`     | Requested model to upstream model. `*` is a wildcard and the most specific pattern wins. An empty value passes the model through: the upstream serves that model natively. With `models` set and no `model`, the upstream only serves models that match. See [Picking a model](#picking-a-model). |
 | `max_tokens` | Caps `max_tokens` for this upstream. |
 | `headers`    | Extra request headers, for gateways that want them. |
-| `priority`   | Lower is tried first. Ties go in file order. |
+| `priority`   | Lower is tried first. Ties go to upstreams that serve the model natively, then file order. Change it at runtime through the [admin API](#admin-api). |
 | `fallback`   | `true` keeps the upstream in reserve: it's tried only after every non-fallback upstream, whatever its priority. Several fallbacks are tried by priority among themselves. |
 | `disabled`   | Keeps the entry in the pool but sends it no traffic. |
 
@@ -294,7 +302,10 @@ keeps showing the old copy.
 | `allow_anonymous` | `false` | Serve requests without a key. Local testing only. |
 | `admin_key` | unset (admin API off) | Key for `/admin`. Must differ from every caller key. |
 | `pool_file` | unset | Where admin-added upstreams are saved. A relative path sits next to the config. |
-| `strategy` | `failover` | `round_robin` spreads load across upstreams that share a priority. Later priorities and fallbacks still only take traffic when those are out. |
+| `strategy` | `priority` | How upstreams are ordered: `priority`, `round_robin`, `default` or `most_quota`. See [Routing strategies](#routing-strategies). `failover` is the old name of `priority`. |
+| `default_upstream` | unset | The upstream the `default` strategy sends traffic to first. |
+| `pin_models` | `false` | Pin every request to its model unless it sends `x-tokenpool-pin: false`. See [Picking a model](#picking-a-model). |
+| `model_aliases` | none | Short names for models, such as `best-code: gpt-5-codex`. |
 | `default_max_tokens` | `8192` | Filled in when a Responses request without `max_output_tokens` goes to an Anthropic upstream. |
 | `max_body_bytes` | `67108864` | Largest request body accepted (64 MiB). |
 | `connect_timeout` | `10s` | Time to connect to an upstream. |
@@ -306,12 +317,12 @@ keeps showing the old copy.
 | upstream answer | what happens | cooldown |
 |---|---|---|
 | 2xx | relayed to the client | none |
-| 429 | next upstream | `Retry-After` / reset headers, else `cooldowns.rate_limit` (1m) |
+| 429 | next upstream | `Retry-After`, an exhausted usage window's reset (a weekly limit outlasts the 5-hour one), reset headers or the body's `resets_in_seconds`, else `cooldowns.rate_limit` (1m) |
 | 503, 529 | next upstream | `Retry-After`, else `cooldowns.overloaded` (15s) |
 | 402, or 400/403/422 saying "credit balance", "quota", "billing"… | next upstream | reset headers, else `cooldowns.quota` (1h) |
 | 401, 403 | next upstream (check the key) | `cooldowns.auth` (10m) |
 | other 5xx, 408, timeout, connection error | next upstream | `Retry-After`, else `cooldowns.error` (30s) |
-| 404 | next upstream (that upstream lacks the model or path) | none |
+| 404, or 400 saying the model is not supported | next upstream (that upstream lacks the model or path) | none |
 | 3xx | next upstream (redirects are never followed, so keys can't leak) | none |
 | other 4xx | relayed: the request itself is at fault | none |
 
@@ -323,12 +334,128 @@ Code and the SDKs retry these on their own.
 tokenpool can only fail over before the response starts. Once an upstream
 starts streaming, the client stays on that stream to the end.
 
+## Picking a model
+
+An upstream serves a model **natively** when it sends the requested model
+as is: it has no `models`/`model` rewriting for it, or its `models` entry
+for it is empty. An upstream that maps the model to another one (Claude
+requests to a Grok or Codex model) serves it by **translation**.
+
+```yaml
+upstreams:
+  - name: claude-1
+    url: https://api.anthropic.com
+    format: anthropic
+    token: sk-ant-oat01-...
+    models: {"claude-*": ""}             # Claude models, natively
+
+  - name: codex-1
+    format: openai
+    auth: chatgpt
+    token_file: ~/.codex/auth.json
+    models:
+      "gpt-*": ""                        # OpenAI models, natively
+      "claude-*": gpt-5-codex            # Claude requests, by translation
+
+model_aliases:
+  best-code: gpt-5-codex                 # clients can ask for "best-code"
+```
+
+- A request goes to every upstream that can serve it. Among upstreams of
+  equal priority, native ones come first, so `claude-opus-*` goes to
+  `claude-1` and `gpt-5-codex` goes to `codex-1`.
+- **Pinned** requests only go to native upstreams, so a model you chose
+  for a reason is never swapped for another. Pin one request with the
+  header `x-tokenpool-pin: true`, or every request with `pin_models: true`
+  (and unpin one with `x-tokenpool-pin: false`). A pinned request whose
+  native upstreams are all out gets a 429 or 503, not another model.
+- Unpinned requests fall over to translation when every native upstream
+  is out, or earlier when you put a translating upstream first with a
+  lower priority, the `default` strategy or `most_quota`.
+- An alias is resolved before routing, and the upstream receives the real
+  model name. `GET /v1/models` lists aliases too.
+
+In Claude Code, pick a model with `claude --model gpt-5-codex` (or an
+alias), and pin every request with
+`ANTHROPIC_CUSTOM_HEADERS="x-tokenpool-pin: true"`.
+
+In a mixed pool, give each upstream a `models` list so tokenpool knows
+what it serves. An upstream without one passes every model through, and
+counts as native for all of them.
+
+## Routing strategies
+
+`strategy` decides which upstream goes first. Fallbacks (`fallback: true`)
+always come after every other upstream, and pinning always applies.
+
+| strategy | order |
+| --- | --- |
+| `priority` | Lowest `priority` first. Ties: native upstreams, then file order. |
+| `round_robin` | Like `priority`, but rotates among upstreams that tie, to spread load. |
+| `default` | `default_upstream` takes every request it can serve, until it is limited or failing. Then `priority` order. |
+| `most_quota` | The upstream with the most quota left right now, in whole percents. Ties go by `priority`, then nativeness. An upstream that has not reported its quota yet counts as full. |
+
+Use `default` to make one account the main one for a while, and
+`most_quota` to always spend whichever account has the most left. Set the
+strategy in the config file, or switch at runtime:
+
+```sh
+curl -X PUT localhost:8080/admin/strategy -H "$A" -d '{"strategy":"most_quota"}'
+curl -X POST localhost:8080/admin/upstreams/codex-1/default -H "$A"    # also sets strategy: default
+curl -X DELETE localhost:8080/admin/default -H "$A"                    # back to priority
+curl -X POST localhost:8080/admin/upstreams/claude-2/priority -H "$A" -d '{"priority":0}'
+```
+
+Changes made through the admin API are saved in `pool_file` and survive a
+restart. They win over the config file until you change them again
+through the API. Without a `pool_file` they last until restart.
+
+## Quota tracking
+
+Every response from an upstream carries its usage limits in headers.
+tokenpool keeps the latest reading per upstream:
+
+| Provider | Headers | Windows |
+| --- | --- | --- |
+| Claude subscription (setup-token) | `anthropic-ratelimit-unified-5h-utilization`, `-7d-utilization`, their `-reset` and `-status` | `5h`, `7d` (and model-specific ones such as `7d_opus`) |
+| Codex (ChatGPT login) | `x-codex-primary-used-percent`, `-window-minutes`, `-reset-at`, and the same for `secondary` | `codex.primary`, `codex.secondary` |
+| Anthropic API key | `anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-{remaining,limit,reset}` | `requests`, `tokens`, ... |
+| OpenAI, xAI and other API keys | `x-ratelimit-{remaining,limit,reset}-{requests,tokens}` | `requests`, `tokens` |
+
+An upstream's remaining quota is its smallest remaining share across the
+windows that apply to every model. A window whose reset time has passed
+counts as full again. Model-specific windows are shown but not counted.
+Read it in `GET /admin/upstreams` (each upstream's `quota`) or as a
+summary in `GET /admin/status`:
+
+```json
+{
+  "strategy": "most_quota",
+  "first": "codex-1",
+  "upstreams": [
+    {"name": "codex-1", "state": "available", "priority": 1,
+     "remaining_percent": 65, "window": "codex.secondary", "resets_at": "2026-10-29T08:00:00Z"},
+    {"name": "claude-2", "state": "available", "priority": 1,
+     "remaining_percent": 25, "window": "7d", "resets_at": "2026-10-28T10:00:00Z"},
+    {"name": "claude-1", "state": "cooling", "priority": 0,
+     "remaining_percent": 0, "window": "7d", "resets_at": "2026-10-27T10:00:00Z",
+     "cooldown_until": "2026-10-27T10:00:00Z", "cooldown_reason": "rate limited"}
+  ],
+  "pin_models": false
+}
+```
+
+`first` is where a request that every upstream can serve would go right
+now. When a limit runs out, the upstream sits out until that window
+resets: a Claude account out of its weekly limit is not retried every five
+hours.
+
 ## Admin API
 
 Set `admin_key` to turn it on, and send that key as `x-api-key` or a bearer
 token. Upstreams you add here go in `pool_file` (mode 0600), so they survive
-restarts. Upstreams from the config file can be disabled, enabled or reset
-here, but you edit them in the file.
+restarts. Upstreams from the config file can be paused, resumed, reset,
+reprioritized or made the default here, but you edit the rest in the file.
 
 ```sh
 A="Authorization: Bearer $TOKENPOOL_ADMIN_KEY"
@@ -342,9 +469,19 @@ curl -X POST localhost:8080/admin/upstreams -H "$A" -d '{
 curl localhost:8080/admin/upstreams -H "$A"                              # the pool, keys redacted
 curl -X PUT localhost:8080/admin/upstreams/claude-third -H "$A" -d '{...}' # replace (omit token to keep it)
 curl -X POST localhost:8080/admin/upstreams/claude-primary/reset -H "$A"   # clear a cooldown
-curl -X POST localhost:8080/admin/upstreams/claude-primary/disable -H "$A" # pause (also: enable)
+curl -X POST localhost:8080/admin/upstreams/claude-primary/pause -H "$A"   # stop sending it traffic (also: resume)
 curl -X DELETE localhost:8080/admin/upstreams/claude-third -H "$A"
+
+curl localhost:8080/admin/status -H "$A"                                 # strategy, order, quota left
+curl -X POST localhost:8080/admin/upstreams/claude-third/priority -H "$A" -d '{"priority":0}'
+curl -X POST localhost:8080/admin/upstreams/claude-third/default -H "$A"  # make it the main one
+curl -X DELETE localhost:8080/admin/default -H "$A"
+curl -X PUT localhost:8080/admin/strategy -H "$A" -d '{"strategy":"most_quota"}'
 ```
+
+`pause` and `resume` are also `disable` and `enable`. Pauses, priorities,
+the default and the strategy are saved to `pool_file`, for upstreams from
+the config file too, so they survive a restart.
 
 ## Translation notes
 
@@ -463,6 +600,58 @@ credential, and may enforce that without notice. Use one here at your own
 discretion. A Console API key is the credential those terms allow for any
 other caller.
 
+## Codex: ChatGPT login
+
+A ChatGPT plan's Codex quota is an upstream too. Sign in with the
+[Codex CLI](https://github.com/openai/codex) and point `token_file` at the
+`auth.json` it writes:
+
+```sh
+CODEX_HOME=~/.config/tokenpool/codex codex login --device-auth   # a login only tokenpool uses
+```
+
+```yaml
+  - name: codex-1
+    format: openai
+    auth: chatgpt                          # optional: a Codex auth.json selects it
+    token_file: ~/.config/tokenpool/codex/auth.json
+    # url defaults to https://chatgpt.com/backend-api/codex
+    models:
+      "gpt-*": ""                          # the models your plan lists
+      "claude-*": gpt-5-codex              # optional: take Claude requests too
+```
+
+tokenpool calls the endpoint the Codex CLI calls,
+`https://chatgpt.com/backend-api/codex/responses`, with the same headers:
+`Authorization: Bearer` with the login's access token, `ChatGPT-Account-ID`,
+`originator: codex_cli_rs` and a `codex_cli_rs/...` User-Agent. That
+backend only streams, never stores, takes `input` only as a list and
+rejects `max_output_tokens` and `temperature`, so tokenpool shapes requests
+that way and collects the stream into one response for clients that did
+not ask to stream.
+
+When the access token is about to expire, or the backend rejects it,
+tokenpool refreshes the login at `auth.openai.com` the way the Codex CLI
+does, and writes the new tokens back to `auth.json` (atomically, mode
+0600). The refresh token changes on every refresh, so give tokenpool its
+own login (its own `CODEX_HOME`) rather than the one your `codex` CLI uses:
+two programs refreshing one login log each other out. If the refresh
+token stops working, the error says so; run `codex login` again.
+
+The models a ChatGPT login can use depend on the plan and change over
+time; the backend answers `model_not_found` for others, and tokenpool then
+tries the next upstream. `codex` lists them in its `/model` picker. Codex's
+usage limits show up in [quota tracking](#quota-tracking).
+
+A Codex `auth.json` from an API-key login (`OPENAI_API_KEY`) is read as a
+plain bearer key; point that upstream at `https://api.openai.com/v1`.
+
+A ChatGPT login is a personal account credential. OpenAI's
+[terms of use](https://openai.com/policies/terms-of-use/) say not to share
+account credentials or make your account available to anyone else. Use a
+login here at your own discretion; an OpenAI API key is the credential
+for serving other people.
+
 ## Grok: API key or Grok login
 
 A Grok upstream takes either an API key from
@@ -534,5 +723,5 @@ Report security problems privately, as [SECURITY.md](SECURITY.md) describes.
 ## License
 
 [MIT](LICENSE). tokenpool is an independent project, not affiliated with or
-endorsed by Anthropic or xAI. Claude and Grok are trademarks of their
-owners.
+endorsed by Anthropic, OpenAI or xAI. Claude, Codex, ChatGPT and Grok are
+trademarks of their owners.

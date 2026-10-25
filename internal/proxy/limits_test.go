@@ -42,6 +42,19 @@ func TestResetAfter(t *testing.T) {
 		{"unix reset without remaining", header(
 			"Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(now.Add(3*time.Hour).Unix(), 10),
 		), 3 * time.Hour, true},
+		{"weekly limit outlasts the 5h window", header(
+			"Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(now.Add(2*time.Hour).Unix(), 10),
+			"Anthropic-Ratelimit-Unified-5h-Utilization", "0.3",
+			"Anthropic-Ratelimit-Unified-5h-Reset", strconv.FormatInt(now.Add(2*time.Hour).Unix(), 10),
+			"Anthropic-Ratelimit-Unified-7d-Utilization", "1.0",
+			"Anthropic-Ratelimit-Unified-7d-Status", "rejected",
+			"Anthropic-Ratelimit-Unified-7d-Reset", strconv.FormatInt(now.Add(72*time.Hour).Unix(), 10),
+		), 72 * time.Hour, true},
+		{"codex window used up", header(
+			"X-Codex-Primary-Used-Percent", "100",
+			"X-Codex-Primary-Reset-At", strconv.FormatInt(now.Add(2*time.Hour).Unix(), 10),
+			"X-Codex-Secondary-Used-Percent", "40",
+		), 2 * time.Hour, true},
 		{"nothing", header("Content-Type", "application/json"), 0, false},
 	}
 	for _, tt := range tests {
@@ -79,6 +92,9 @@ func TestClassify(t *testing.T) {
 		{404, header(), `{"error":{"message":"model not found"}}`, skip, 0, false},
 		{400, header(), `{"error":{"message":"messages: field required"}}`, relay, 0, false},
 		{413, header(), ``, relay, 0, false},
+		{400, header(), `{"error":{"code":"model_not_found","message":"The 'gpt-5' model is not supported when using Codex with a ChatGPT account."}}`, skip, 0, false},
+		{429, header(), `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":600}}`, bench, 10 * time.Minute, true},
+		{429, header(), `{"error":{"type":"usage_limit_reached","resets_at":` + strconv.FormatInt(now.Add(20*time.Minute).Unix(), 10) + `}}`, bench, 20 * time.Minute, true},
 	}
 	for _, tt := range tests {
 		v := classify(tt.status, tt.h, []byte(tt.body), cd, now)
