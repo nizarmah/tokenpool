@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -85,13 +86,39 @@ var quotaWords = []string{
 	"exceeded your", "rate limit", "rate_limit",
 }
 
-// modelMissing spots a 400 that says the upstream lacks the model, such
-// as the Codex backend's "The 'x' model is not supported when using Codex
-// with a ChatGPT account." (code model_not_found).
+var (
+	codexModelMissing = regexp.MustCompile(`model[^"]* is not supported when using codex`)
+	modelNotExist     = regexp.MustCompile(`the model [^ "]+ does not exist`)
+)
+
+// modelMissing spots a 400 that says the upstream lacks the model: code or
+// type model_not_found, the Codex backend's "The 'x' model is not
+// supported when using Codex with a ChatGPT account.", or OpenAI's and
+// xAI's "The model `x` does not exist". A complaint about a parameter
+// ("Unsupported parameter: 'temperature' is not supported with this
+// model.") is not one: every upstream would reject it the same way.
 func modelMissing(body []byte) bool {
+	var shape struct {
+		Error struct {
+			Type  string          `json:"type"`
+			Code  json.RawMessage `json:"code"`
+			Param json.RawMessage `json:"param"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(body, &shape)
+	e := shape.Error
+	code := strings.Trim(string(e.Code), `"`)
+	if code == "unsupported_parameter" || code == "unsupported_value" {
+		return false
+	}
+	if param := strings.Trim(string(e.Param), `"`); param != "" && param != "null" && param != "model" {
+		return false
+	}
+	if code == "model_not_found" || e.Type == "model_not_found" {
+		return true
+	}
 	lower := strings.ToLower(string(body))
-	return strings.Contains(lower, "model_not_found") ||
-		(strings.Contains(lower, "model") && strings.Contains(lower, "not supported"))
+	return codexModelMissing.MatchString(lower) || modelNotExist.MatchString(lower)
 }
 
 func quotaMessage(body string) bool {

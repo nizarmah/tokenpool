@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.2.1 (2026-10-25)
+
+### Fixed
+
+- A 429 no longer benches a whole upstream until a model-specific limit
+  resets. Claude's weekly Opus limit (`7d_opus`) at 100% used to hold the
+  account for up to `cooldowns.max` (24h by default), so Sonnet requests
+  that would have worked were locked out too. Now the upstream waits for
+  its exhausted account-wide window (the 5-hour one, say) or its soonest
+  reset.
+- A 400 about a bad parameter goes back to the client again. Bodies such
+  as "Unsupported parameter: 'temperature' is not supported with this
+  model." were read as "model not available here", so the request was
+  tried on every upstream and the client got a 503 instead of the 400.
+  Only `model_not_found`, the Codex "model is not supported when using
+  Codex" reply and "The model `x` does not exist" count now.
+- `most_quota` no longer ranks API keys by their per-minute rate counters.
+  Those refill every minute and read close to 100%, so a pay-per-token key
+  outranked every subscription. Counter windows are now marked
+  `rate: true` and are not quota: an upstream with only those goes after
+  every upstream that reports quota left.
+
 ## v0.2.0 (2026-10-25)
 
 ### Added

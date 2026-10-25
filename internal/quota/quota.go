@@ -32,6 +32,10 @@ type Window struct {
 	// (Claude's 7d_opus, a Codex model limit). It is shown but does not
 	// count toward the upstream's overall remaining quota.
 	ModelSpecific bool `json:"model_specific,omitempty"`
+	// Rate marks an API key's requests or tokens counter. It refills
+	// within a minute or so, so it says nothing about how much an account
+	// has left: it is shown but does not count toward remaining quota.
+	Rate bool `json:"rate,omitempty"`
 }
 
 var (
@@ -150,6 +154,7 @@ func counter(name, remaining, limit, reset string, now time.Time) (Window, bool)
 	}
 	w := newWindow(name, 100*(1-rem/lim))
 	w.ResetsAt = resetTime(reset, now)
+	w.Rate = true
 	return w, true
 }
 
@@ -218,12 +223,13 @@ func Current(w Window, now time.Time) Window {
 }
 
 // Remaining is the share of quota left across ws: the smallest remaining
-// percentage among the windows that apply to every model. binding names
-// that window. known is false when ws holds no such window.
+// percentage among the usage windows that apply to every model. Rate
+// counters and model-specific windows do not count. binding names that
+// window. known is false when ws holds no such window.
 func Remaining(ws []Window, now time.Time) (pct float64, binding Window, known bool) {
 	pct = 100
 	for _, w := range ws {
-		if w.ModelSpecific {
+		if w.ModelSpecific || w.Rate {
 			continue
 		}
 		w = Current(w, now)
@@ -235,12 +241,14 @@ func Remaining(ws []Window, now time.Time) (pct float64, binding Window, known b
 }
 
 // Exhausted returns how long until every exhausted window in ws has reset:
-// the latest reset among windows at 100% used or rejected. ok is false when
-// no window is exhausted or none of them says when it resets.
+// the latest reset among windows at 100% used or rejected. Model-specific
+// windows (Claude's 7d_opus) are left out: they block one model, not the
+// whole upstream. ok is false when no window is exhausted or none of them
+// says when it resets.
 func Exhausted(ws []Window, now time.Time) (time.Duration, bool) {
 	var latest time.Time
 	for _, w := range ws {
-		if (w.RemainingPercent > 0 && w.Status != "rejected") || w.ResetsAt == nil {
+		if w.ModelSpecific || (w.RemainingPercent > 0 && w.Status != "rejected") || w.ResetsAt == nil {
 			continue
 		}
 		if w.ResetsAt.After(latest) {

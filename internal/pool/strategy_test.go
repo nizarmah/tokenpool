@@ -136,6 +136,37 @@ func TestMostQuotaStrategy(t *testing.T) {
 	}
 }
 
+func TestMostQuotaIgnoresAPIKeyRateCounters(t *testing.T) {
+	// An API key listed first, with the better priority, and a subscription.
+	p, _ := New("most_quota", []config.Upstream{up("key", 0), up("sub", 1)}, "")
+	clk := &clock{t: time.Unix(1_800_000_000, 0)}
+	p.SetClock(clk.now)
+	ups := map[string]*Upstream{}
+	for _, c := range p.PickFor(Request{Model: "gpt-5"}).Candidates {
+		ups[c.Name] = c.Upstream
+	}
+	key := http.Header{}
+	key.Set("x-ratelimit-limit-requests", "500")
+	key.Set("x-ratelimit-remaining-requests", "499")
+	key.Set("x-ratelimit-reset-requests", "120ms")
+	p.Observe(ups["key"], key)
+	p.Observe(ups["sub"], quotaHeader(60, clk.t.Add(time.Hour)))
+	if got := names(p.PickFor(Request{Model: "gpt-5"}).Candidates); got != "sub,key" {
+		t.Errorf("order = %s, want the subscription before the per-minute API key", got)
+	}
+	sum := p.Summarize()
+	for _, r := range sum.Upstreams {
+		if r.Name == "key" && r.RemainingPercent != nil {
+			t.Errorf("key shows %v%% quota from a rate counter", *r.RemainingPercent)
+		}
+	}
+	// Under priority the key still goes first.
+	p2, _ := New("priority", []config.Upstream{up("key", 0), up("sub", 1)}, "")
+	if got := names(p2.PickFor(Request{Model: "gpt-5"}).Candidates); got != "key,sub" {
+		t.Errorf("priority order = %s", got)
+	}
+}
+
 func TestFallbackStaysLastUnderEveryStrategy(t *testing.T) {
 	ups := mixed()
 	ups[0].Fallback = true // codex

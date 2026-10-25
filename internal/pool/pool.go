@@ -356,8 +356,7 @@ func (p *Pool) order(c []Candidate, now time.Time) {
 	left := make(map[*Upstream]int, len(c))
 	if p.strategy == MostQuota {
 		for _, x := range c {
-			pct, _, _ := quota.Remaining(x.quota, now)
-			left[x.Upstream] = int(pct) // whole percents, so noise doesn't reorder
+			left[x.Upstream] = quotaRank(x.quota, now)
 		}
 	}
 	sort.SliceStable(c, func(i, j int) bool {
@@ -379,6 +378,22 @@ func (p *Pool) order(c []Candidate, now time.Time) {
 		}
 		return a.seq < b.seq
 	})
+}
+
+// quotaRank is an upstream's place under most_quota, in whole percents so
+// noise doesn't reorder. An upstream that has not reported yet counts as
+// full, so it gets tried and reports. One that reports only rate counters
+// (an API key) has no quota to compare: it goes after every upstream that
+// reports some, and those go by priority among themselves.
+func quotaRank(ws []quota.Window, now time.Time) int {
+	if len(ws) == 0 {
+		return 100
+	}
+	pct, _, known := quota.Remaining(ws, now)
+	if !known {
+		return -1
+	}
+	return int(pct)
 }
 
 // rotateTiers rotates each run of candidates sharing a priority (and

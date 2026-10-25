@@ -50,6 +50,18 @@ func TestResetAfter(t *testing.T) {
 			"Anthropic-Ratelimit-Unified-7d-Status", "rejected",
 			"Anthropic-Ratelimit-Unified-7d-Reset", strconv.FormatInt(now.Add(72*time.Hour).Unix(), 10),
 		), 72 * time.Hour, true},
+		{"a model limit does not hold the whole account", header(
+			"Anthropic-Ratelimit-Unified-Status", "rejected",
+			"Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(now.Add(time.Hour).Unix(), 10),
+			"Anthropic-Ratelimit-Unified-5h-Utilization", "1.0",
+			"Anthropic-Ratelimit-Unified-5h-Status", "rejected",
+			"Anthropic-Ratelimit-Unified-5h-Reset", strconv.FormatInt(now.Add(time.Hour).Unix(), 10),
+			"Anthropic-Ratelimit-Unified-7d-Utilization", "0.4",
+			"Anthropic-Ratelimit-Unified-7d-Reset", strconv.FormatInt(now.Add(72*time.Hour).Unix(), 10),
+			"Anthropic-Ratelimit-Unified-7d_opus-Utilization", "1.0",
+			"Anthropic-Ratelimit-Unified-7d_opus-Status", "rejected",
+			"Anthropic-Ratelimit-Unified-7d_opus-Reset", strconv.FormatInt(now.Add(120*time.Hour).Unix(), 10),
+		), time.Hour, true},
 		{"codex window used up", header(
 			"X-Codex-Primary-Used-Percent", "100",
 			"X-Codex-Primary-Reset-At", strconv.FormatInt(now.Add(2*time.Hour).Unix(), 10),
@@ -93,6 +105,12 @@ func TestClassify(t *testing.T) {
 		{400, header(), `{"error":{"message":"messages: field required"}}`, relay, 0, false},
 		{413, header(), ``, relay, 0, false},
 		{400, header(), `{"error":{"code":"model_not_found","message":"The 'gpt-5' model is not supported when using Codex with a ChatGPT account."}}`, skip, 0, false},
+		{400, header(), `{"detail":"The 'gpt-4o' model is not supported when using Codex with a ChatGPT account."}`, skip, 0, false},
+		{400, header(), "{\"error\":{\"message\":\"The model `gpt-9` does not exist or you do not have access to it.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}", skip, 0, false},
+		// A bad parameter goes back to the client: every upstream would say the same.
+		{400, header(), `{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model.","type":"invalid_request_error","param":"temperature","code":"unsupported_parameter"}}`, relay, 0, false},
+		{400, header(), `{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model.","code":"unsupported_parameter"}}`, relay, 0, false},
+		{400, header(), `{"error":{"message":"Unsupported value: 'low' is not supported with this model.","param":"reasoning.effort"}}`, relay, 0, false},
 		{429, header(), `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":600}}`, bench, 10 * time.Minute, true},
 		{429, header(), `{"error":{"type":"usage_limit_reached","resets_at":` + strconv.FormatInt(now.Add(20*time.Minute).Unix(), 10) + `}}`, bench, 20 * time.Minute, true},
 	}

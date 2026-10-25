@@ -393,10 +393,12 @@ always come after every other upstream, and pinning always applies.
 | `priority` | Lowest `priority` first. Ties: native upstreams, then file order. |
 | `round_robin` | Like `priority`, but rotates among upstreams that tie, to spread load. |
 | `default` | `default_upstream` takes every request it can serve, until it is limited or failing. Then `priority` order. |
-| `most_quota` | The upstream with the most quota left right now, in whole percents. Ties go by `priority`, then nativeness. An upstream that has not reported its quota yet counts as full. |
+| `most_quota` | The upstream with the most quota left right now, in whole percents. Ties go by `priority`, then nativeness. An upstream that has not reported its quota yet counts as full. An API key reports only per-minute rate counters, which are not quota, so it goes after every upstream that reports some. |
 
 Use `default` to make one account the main one for a while, and
-`most_quota` to always spend whichever account has the most left. Set the
+`most_quota` to always spend whichever account has the most left. If you
+pay per token for an API key, still mark it `fallback: true`: then it is
+used only once every subscription is limited, under every strategy. Set the
 strategy in the config file, or switch at runtime:
 
 ```sh
@@ -419,12 +421,17 @@ tokenpool keeps the latest reading per upstream:
 | --- | --- | --- |
 | Claude subscription (setup-token) | `anthropic-ratelimit-unified-5h-utilization`, `-7d-utilization`, their `-reset` and `-status` | `5h`, `7d` (and model-specific ones such as `7d_opus`) |
 | Codex (ChatGPT login) | `x-codex-primary-used-percent`, `-window-minutes`, `-reset-at`, and the same for `secondary` | `codex.primary`, `codex.secondary` |
-| Anthropic API key | `anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-{remaining,limit,reset}` | `requests`, `tokens`, ... |
-| OpenAI, xAI and other API keys | `x-ratelimit-{remaining,limit,reset}-{requests,tokens}` | `requests`, `tokens` |
+| Anthropic API key | `anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-{remaining,limit,reset}` | `requests`, `tokens`, ... (`rate: true`) |
+| OpenAI, xAI and other API keys | `x-ratelimit-{remaining,limit,reset}-{requests,tokens}` | `requests`, `tokens` (`rate: true`) |
 
 An upstream's remaining quota is its smallest remaining share across the
 windows that apply to every model. A window whose reset time has passed
-counts as full again. Model-specific windows are shown but not counted.
+counts as full again. Model-specific windows (`model_specific: true`) and
+API-key rate counters (`rate: true`, which refill every minute) are shown
+but not counted. A rate limit that hits only one model, such as Claude's
+weekly Opus limit, does not bench the whole upstream until that limit
+resets: the upstream waits for its soonest reset instead, so other models
+keep working.
 Read it in `GET /admin/upstreams` (each upstream's `quota`) or as a
 summary in `GET /admin/status`:
 
