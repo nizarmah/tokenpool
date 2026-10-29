@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 
 	"github.com/nizarmah/tokenpool/internal/config"
 	"github.com/nizarmah/tokenpool/internal/pool"
@@ -72,9 +73,22 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 				return
 			}
 			st, err = s.pool.SetPriority(name, *body.Priority)
+		case "min_client_priority":
+			var body struct {
+				MinClientPriority *config.ClientPriority `json:"min_client_priority"`
+			}
+			if !decodeJSON(w, r, &body) {
+				return
+			}
+			if body.MinClientPriority == nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": `send {"min_client_priority": "low" | "normal" | "high"}`})
+				return
+			}
+			st, err = s.pool.SetMinClientPriority(name, config.NormalizePriority(*body.MinClientPriority))
 		default:
 			writeJSON(w, http.StatusNotFound, map[string]string{
-				"error": "unknown action " + op + ": use pause, resume, reset, default or priority"})
+				"error": "unknown action " + op + ": use pause, resume, reset, default, priority or min_client_priority"})
 			return
 		}
 		s.adminReply(w, r, http.StatusOK, st, err, "upstream "+r.PathValue("op"))
@@ -114,10 +128,23 @@ type statusView struct {
 	pool.Summary
 	PinModels    bool              `json:"pin_models"`
 	ModelAliases map[string]string `json:"model_aliases,omitempty"`
+	// Callers lists each caller's name and priority, never its key.
+	Callers []callerView `json:"callers"`
+}
+
+type callerView struct {
+	Name     string                `json:"name"`
+	Priority config.ClientPriority `json:"priority"`
 }
 
 func (s *Server) status() statusView {
-	return statusView{Summary: s.pool.Summarize(), PinModels: s.cfg.PinModels, ModelAliases: s.cfg.ModelAliases}
+	callers := make([]callerView, 0, len(s.cfg.ClientKeys))
+	for name := range s.cfg.ClientKeys {
+		callers = append(callers, callerView{Name: name, Priority: s.cfg.PriorityOf(name)})
+	}
+	sort.Slice(callers, func(i, j int) bool { return callers[i].Name < callers[j].Name })
+	return statusView{Summary: s.pool.Summarize(), PinModels: s.cfg.PinModels,
+		ModelAliases: s.cfg.ModelAliases, Callers: callers}
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -237,5 +238,128 @@ func TestPoolFileClashWithConfig(t *testing.T) {
 	}
 	if _, err := New("failover", []config.Upstream{up("dup", 0)}, file); err == nil {
 		t.Error("want an error when the pool file and config share a name")
+	}
+}
+
+func restricted(name string, priority int, min config.ClientPriority) config.Upstream {
+	u := up(name, priority)
+	u.MinClientPriority = min
+	return u
+}
+
+func TestCallerPriorityFiltersBeforeRouting(t *testing.T) {
+	paid := restricted("paid", 1, config.PriorityHigh)
+	reserve := restricted("reserve", 5, config.PriorityHigh)
+	reserve.Fallback = true
+	mid := restricted("mid", 2, config.PriorityNormal)
+	free := up("free", 3)
+	ups := []config.Upstream{paid, mid, free, reserve}
+
+	for _, strategy := range []string{"priority", "round_robin", "most_quota", "default"} {
+		t.Run(strategy, func(t *testing.T) {
+			p, err := Open(Options{Strategy: strategy, Default: "paid", Upstreams: ups})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for prio, want := range map[config.ClientPriority]string{
+				config.PriorityHigh:   "paid,mid,free,reserve",
+				config.PriorityNormal: "mid,free",
+				config.PriorityLow:    "free",
+				"":                    "free", // unranked callers count as low
+			} {
+				got := names(p.PickFor(Request{Model: "m", Priority: prio}).Candidates)
+				if strategy == "round_robin" {
+					// Rotation within a tier is covered elsewhere; only membership matters here.
+					got = sortedNames(got)
+					want = sortedNames(want)
+				}
+				if got != want {
+					t.Errorf("priority %q: candidates %s, want %s", prio, got, want)
+				}
+			}
+		})
+	}
+
+	p, _ := New("priority", ups, "")
+	sel := p.PickFor(Request{Model: "m", Priority: config.PriorityLow})
+	if got := strings.Join(sel.Excluded, "; "); got != "paid (needs high); mid (needs normal); reserve (needs high)" {
+		t.Errorf("excluded = %q", got)
+	}
+	if got := p.Wait(Request{Model: "m", Priority: config.PriorityLow}); got != 0 {
+		t.Errorf("wait = %v", got)
+	}
+}
+
+func sortedNames(csv string) string {
+	parts := strings.Split(csv, ",")
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+func TestExcludedUpstreamsIgnoreDisabledAndCooling(t *testing.T) {
+	p, _ := New("priority", []config.Upstream{restricted("paid", 1, config.PriorityHigh)}, "")
+	p.Fail(p.find("paid"), 429, time.Hour, "limited")
+	low := p.PickFor(Request{Model: "m", Priority: config.PriorityLow})
+	// A low caller is refused by policy, not told the upstream is cooling.
+	if len(low.Candidates)+len(low.Unavailable) != 0 || len(low.Excluded) != 1 || low.Wait != 0 {
+		t.Errorf("low caller selection = %+v", low)
+	}
+	high := p.PickFor(Request{Model: "m", Priority: config.PriorityHigh})
+	if len(high.Unavailable) != 1 || len(high.Excluded) != 0 {
+		t.Errorf("high caller selection = %+v", high)
+	}
+}
+
+func TestMinClientPriorityPersists(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "pool.json")
+	static := []config.Upstream{up("static", 1)}
+	p, err := New("priority", static, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Add(restricted("added", 2, config.PriorityNormal)); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := p.Get("static"); st.MinClientPriority != config.PriorityLow {
+		t.Errorf("default min = %q, want low", st.MinClientPriority)
+	}
+
+	st, err := p.SetMinClientPriority("static", config.PriorityHigh)
+	if err != nil || st.MinClientPriority != config.PriorityHigh {
+		t.Fatalf("set on a config upstream: %+v, %v", st, err)
+	}
+	if _, err := p.SetMinClientPriority("added", " HIGH "); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.SetMinClientPriority("static", "urgent"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("bad value: %v", err)
+	}
+	if _, err := p.SetMinClientPriority("nope", config.PriorityHigh); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown upstream: %v", err)
+	}
+	if got := names(p.PickFor(Request{Model: "m", Priority: config.PriorityNormal}).Candidates); got != "" {
+		t.Errorf("normal caller still reaches %q", got)
+	}
+
+	reloaded, err := New("priority", static, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"static", "added"} {
+		if st, _ := reloaded.Get(name); st.MinClientPriority != config.PriorityHigh {
+			t.Errorf("%s after restart: min = %q", name, st.MinClientPriority)
+		}
+	}
+
+	// Back to everyone; an empty value means low.
+	if _, err := reloaded.SetMinClientPriority("static", ""); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := New("priority", static, file)
+	if st, _ := again.Get("static"); st.MinClientPriority != config.PriorityLow {
+		t.Errorf("reset: min = %q", st.MinClientPriority)
+	}
+	if got := names(again.PickFor(Request{Model: "m", Priority: config.PriorityLow}).Candidates); got != "static" {
+		t.Errorf("low caller reaches %q", got)
 	}
 }

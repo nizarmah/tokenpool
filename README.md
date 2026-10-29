@@ -40,6 +40,9 @@ switch.
   to whichever upstream has the most quota left right now.
 - **Caller keys.** Every person or app gets its own tokenpool key. Upstream
   keys stay on the server and never reach clients.
+- **Caller priority.** Rank callers low, normal or high, and keep a paid
+  API key for the ones that matter. A low caller is never sent to an
+  upstream that asks for more.
 - **Runtime admin API.** Add, update, pause or remove upstreams, change
   priorities, the default and the strategy, without a restart.
 
@@ -260,6 +263,7 @@ xAI API key is the credential those terms allow. Details are under
 | `priority`   | Lower is tried first. Ties go to upstreams that serve the model natively, then file order. Change it at runtime through the [admin API](#admin-api). |
 | `fallback`   | `true` keeps the upstream in reserve: it's tried only after every non-fallback upstream, whatever its priority. Several fallbacks are tried by priority among themselves. |
 | `disabled`   | Keeps the entry in the pool but sends it no traffic. |
+| `min_client_priority` | The lowest caller priority this upstream serves: `low` (default, everyone), `normal` or `high`. See [Caller priority](#caller-priority). |
 
 ### Keys from a file
 
@@ -299,6 +303,7 @@ keeps showing the old copy.
 | --- | --- | --- |
 | `listen` | `:8080` | Address to serve on. `127.0.0.1:8080` accepts local connections only. |
 | `client_keys` | required | `name: key` per caller. Names show up in the logs. |
+| `client_priorities` | none | `name: low`, `normal` or `high` per caller. A caller left out is `normal`. See [Caller priority](#caller-priority). |
 | `allow_anonymous` | `false` | Serve requests without a key. Local testing only. |
 | `admin_key` | unset (admin API off) | Key for `/admin`. Must differ from every caller key. |
 | `pool_file` | unset | Where admin-added upstreams are saved. A relative path sits next to the config. |
@@ -412,6 +417,88 @@ Changes made through the admin API are saved in `pool_file` and survive a
 restart. They win over the config file until you change them again
 through the API. Without a `pool_file` they last until restart.
 
+## Caller priority
+
+Several projects can share one pool. Some upstreams are too scarce to
+share, like a paid API key. Give each caller a priority and each upstream
+the lowest priority it will serve.
+
+```yaml
+client_keys:
+  alice: <tokenpool keygen output>    # your own work
+  shop: <tokenpool keygen output>
+  batch: <tokenpool keygen output>    # bulk jobs, nobody waits on them
+
+client_priorities:                    # low, normal or high; no entry means normal
+  alice: high
+  batch: low
+
+upstreams:
+  - name: claude-sub-1
+    url: https://api.anthropic.com
+    format: anthropic
+    token: sk-ant-oat01-...
+    priority: 1
+
+  - name: claude-sub-2
+    url: https://api.anthropic.com
+    format: anthropic
+    token: sk-ant-oat01-...
+    priority: 2
+
+  - name: codex
+    format: openai
+    auth: chatgpt
+    token_file: ~/.config/tokenpool/codex/auth.json
+    priority: 3
+    models:
+      "gpt-*": ""
+      "claude-*": gpt-5-codex
+
+  - name: claude-api               # paid, per token
+    url: https://api.anthropic.com
+    format: anthropic
+    token: sk-ant-api03-...
+    fallback: true
+    min_client_priority: high      # only high callers
+```
+
+`alice` can use all four, and the API key only once the subscriptions and
+Codex are limited. `shop` and `batch` never reach `claude-api`. `batch` is
+low and `shop` is normal, so you could also set `min_client_priority:
+normal` on an upstream to keep `batch` off it and let `shop` on.
+
+The check runs first. An upstream a caller is not allowed to use is
+dropped before the strategy orders anything, so it is never a failover
+step or a fallback for that caller. It applies to `/v1/messages`,
+`/v1/responses` and `/v1/messages/count_tokens`.
+
+When a caller's priority leaves nothing to try, the answer says so:
+
+- Every upstream that could serve the model is closed to that caller:
+  `403` with `permission_error` (Anthropic shape on `/v1/messages`, OpenAI
+  shape on `/v1/responses`) and the header `X-Tokenpool-Refused:
+  caller-priority`. Waiting will not help, and the SDKs do not retry a
+  `403`.
+- The allowed upstreams exist but are all limited: the usual `429` or
+  `503` with `Retry-After`. The message ends with `the caller's priority
+  (low) excludes claude-api (needs high)`, so you can tell it from a plain
+  limit.
+
+The logs carry `priority=low` next to `client=batch` on the served and
+refused lines. `tokenpool -check` prints each caller's priority and a
+`MIN CALLER` column. Callers without a key (`allow_anonymous`) count as
+`normal`. `client_priorities` is set in the config file only. Misspell a
+name or a priority and tokenpool will not start.
+
+Change an upstream's minimum at runtime, or set it when you add or replace
+one. Config upstreams keep the change in `pool_file`, like a priority:
+
+```sh
+curl -X POST localhost:8080/admin/upstreams/claude-api/min_client_priority -H "$A" \
+  -d '{"min_client_priority":"normal"}'
+```
+
 ## Quota tracking
 
 Every response from an upstream carries its usage limits in headers.
@@ -479,15 +566,16 @@ curl -X POST localhost:8080/admin/upstreams/claude-primary/reset -H "$A"   # cle
 curl -X POST localhost:8080/admin/upstreams/claude-primary/pause -H "$A"   # stop sending it traffic (also: resume)
 curl -X DELETE localhost:8080/admin/upstreams/claude-third -H "$A"
 
-curl localhost:8080/admin/status -H "$A"                                 # strategy, order, quota left
+curl localhost:8080/admin/status -H "$A"                                 # strategy, order, quota left, callers and their priority
 curl -X POST localhost:8080/admin/upstreams/claude-third/priority -H "$A" -d '{"priority":0}'
+curl -X POST localhost:8080/admin/upstreams/claude-third/min_client_priority -H "$A" -d '{"min_client_priority":"high"}'
 curl -X POST localhost:8080/admin/upstreams/claude-third/default -H "$A"  # make it the main one
 curl -X DELETE localhost:8080/admin/default -H "$A"
 curl -X PUT localhost:8080/admin/strategy -H "$A" -d '{"strategy":"most_quota"}'
 ```
 
 `pause` and `resume` are also `disable` and `enable`. Pauses, priorities,
-the default and the strategy are saved to `pool_file`, for upstreams from
+minimum caller priorities, the default and the strategy are saved to `pool_file`, for upstreams from
 the config file too, so they survive a restart.
 
 ## Translation notes

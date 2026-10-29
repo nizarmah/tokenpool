@@ -48,7 +48,8 @@ type Upstream struct {
 	fileTok *fileToken // set when the token comes from token_file
 
 	// Guarded by Pool.mu.
-	prio          int // runtime priority: config, then admin changes
+	prio          int                   // runtime priority: config, then admin changes
+	minCaller     config.ClientPriority // lowest caller priority served: config, then admin changes
 	quota         []quota.Window
 	quotaAt       time.Time
 	disabled      bool
@@ -133,6 +134,10 @@ type Request struct {
 	// Pinned keeps the request on upstreams that serve Model natively:
 	// no upstream may swap it for another model.
 	Pinned bool
+	// Priority is the caller's priority. An upstream whose
+	// min_client_priority ranks above it is skipped. An empty Priority
+	// ranks as low.
+	Priority config.ClientPriority
 }
 
 // Selection is the result of Pick.
@@ -141,6 +146,9 @@ type Selection struct {
 	Candidates []Candidate
 	// Unavailable describes eligible upstreams that are disabled or cooling.
 	Unavailable []string
+	// Excluded names the upstreams that would serve the model but refuse
+	// the caller's priority, each with the priority it needs.
+	Excluded []string
 	// Wait is how long until the soonest cooling upstream is back.
 	Wait time.Duration
 }
@@ -164,8 +172,9 @@ type Pool struct {
 
 // override is an admin change to an upstream from the config file.
 type override struct {
-	Priority *int  `json:"priority,omitempty"`
-	Disabled *bool `json:"disabled,omitempty"`
+	Priority          *int                   `json:"priority,omitempty"`
+	Disabled          *bool                  `json:"disabled,omitempty"`
+	MinClientPriority *config.ClientPriority `json:"min_client_priority,omitempty"`
 }
 
 // Options configure a pool.
@@ -243,6 +252,13 @@ func Open(o Options) (*Pool, error) {
 		if o.Disabled != nil {
 			u.disabled = *o.Disabled
 		}
+		if o.MinClientPriority != nil {
+			if !o.MinClientPriority.Valid() {
+				return nil, fmt.Errorf("%s: override for %q: min_client_priority must be low, normal or high, got %q",
+					file, name, *o.MinClientPriority)
+			}
+			u.minCaller = *o.MinClientPriority
+		}
 		p.overrides[name] = o
 	}
 	p.resort()
@@ -261,7 +277,8 @@ func (p *Pool) SetClock(now func() time.Time) { p.now = now }
 
 func (p *Pool) insert(raw, resolved config.Upstream, static bool) *Upstream {
 	p.seq++
-	u := &Upstream{Upstream: resolved, raw: raw, static: static, seq: p.seq, disabled: resolved.Disabled, prio: resolved.Priority}
+	u := &Upstream{Upstream: resolved, raw: raw, static: static, seq: p.seq, disabled: resolved.Disabled, prio: resolved.Priority,
+		minCaller: resolved.MinClientPriority}
 	if resolved.TokenFile != "" {
 		u.fileTok = &fileToken{path: resolved.TokenFile, field: resolved.TokenField,
 			now: func() time.Time { return p.now() }}
@@ -321,6 +338,10 @@ func (p *Pool) PickFor(req Request) Selection {
 		if req.Pinned && !native {
 			continue
 		}
+		if req.Priority.Rank() < u.minCaller.Rank() {
+			sel.Excluded = append(sel.Excluded, fmt.Sprintf("%s (needs %s)", u.Name, effectiveMin(u.minCaller)))
+			continue
+		}
 		switch {
 		case u.disabled:
 			sel.Unavailable = append(sel.Unavailable, u.Name+": disabled")
@@ -344,6 +365,14 @@ func (p *Pool) PickFor(req Request) Selection {
 		rotateTiers(sel.Candidates, p.rr)
 	}
 	return sel
+}
+
+// effectiveMin names the caller priority an upstream needs: low when unset.
+func effectiveMin(p config.ClientPriority) config.ClientPriority {
+	if p == "" {
+		return config.PriorityLow
+	}
+	return p
 }
 
 // order sorts candidates for the pool's strategy. Caller holds mu.
@@ -474,28 +503,30 @@ func (p *Pool) Wait(req Request) time.Duration {
 
 // Status is the admin view of an upstream. Tokens are redacted.
 type Status struct {
-	Name           string            `json:"name"`
-	URL            string            `json:"url"`
-	Format         config.Format     `json:"format"`
-	Auth           string            `json:"auth"`
-	Token          string            `json:"token,omitempty"`
-	TokenFile      string            `json:"token_file,omitempty"`
-	Model          string            `json:"model,omitempty"`
-	Models         map[string]string `json:"models,omitempty"`
-	MaxTokens      int               `json:"max_tokens,omitempty"`
-	Headers        []string          `json:"headers,omitempty"`
-	Priority       int               `json:"priority"`
-	Fallback       bool              `json:"fallback"`
-	Default        bool              `json:"default,omitempty"`
-	Source         string            `json:"source"`
-	State          string            `json:"state"`
-	CooldownUntil  *time.Time        `json:"cooldown_until,omitempty"`
-	CooldownReason string            `json:"cooldown_reason,omitempty"`
-	LastStatus     int               `json:"last_status,omitempty"`
-	Requests       int64             `json:"requests"`
-	Failures       int64             `json:"failures"`
-	LastUsed       *time.Time        `json:"last_used,omitempty"`
-	Quota          *QuotaStatus      `json:"quota,omitempty"`
+	Name      string            `json:"name"`
+	URL       string            `json:"url"`
+	Format    config.Format     `json:"format"`
+	Auth      string            `json:"auth"`
+	Token     string            `json:"token,omitempty"`
+	TokenFile string            `json:"token_file,omitempty"`
+	Model     string            `json:"model,omitempty"`
+	Models    map[string]string `json:"models,omitempty"`
+	MaxTokens int               `json:"max_tokens,omitempty"`
+	Headers   []string          `json:"headers,omitempty"`
+	Priority  int               `json:"priority"`
+	// MinClientPriority is the lowest caller priority the upstream serves.
+	MinClientPriority config.ClientPriority `json:"min_client_priority"`
+	Fallback          bool                  `json:"fallback"`
+	Default           bool                  `json:"default,omitempty"`
+	Source            string                `json:"source"`
+	State             string                `json:"state"`
+	CooldownUntil     *time.Time            `json:"cooldown_until,omitempty"`
+	CooldownReason    string                `json:"cooldown_reason,omitempty"`
+	LastStatus        int                   `json:"last_status,omitempty"`
+	Requests          int64                 `json:"requests"`
+	Failures          int64                 `json:"failures"`
+	LastUsed          *time.Time            `json:"last_used,omitempty"`
+	Quota             *QuotaStatus          `json:"quota,omitempty"`
 }
 
 // QuotaStatus is what an upstream last reported about its usage limits.
@@ -554,7 +585,7 @@ func (p *Pool) status(u *Upstream) Status {
 	s := Status{
 		Name: u.Name, URL: u.raw.URL, Format: u.Format, Auth: u.statusAuth(),
 		Token: redact(u.Token), TokenFile: u.TokenFile, Model: u.Model, Models: u.Models, MaxTokens: u.MaxTokens,
-		Priority: u.prio, Fallback: u.Fallback, Default: p.strategy == Default && p.def == u.Name, Source: "api", State: "available",
+		Priority: u.prio, MinClientPriority: effectiveMin(u.minCaller), Fallback: u.Fallback, Default: p.strategy == Default && p.def == u.Name, Source: "api", State: "available",
 		LastStatus: u.lastStatus, Requests: u.requests, Failures: u.failures,
 	}
 	if u.static {
@@ -738,6 +769,38 @@ func (p *Pool) SetPriority(name string, priority int) (Status, error) {
 	return p.status(u), nil
 }
 
+// SetMinClientPriority changes the lowest caller priority an upstream
+// serves and saves it to the pool file. An empty value means low: everyone.
+func (p *Pool) SetMinClientPriority(name string, min config.ClientPriority) (Status, error) {
+	min = config.NormalizePriority(min)
+	if min != "" && !min.Valid() {
+		return Status{}, fmt.Errorf("%w: min_client_priority must be low, normal or high, got %q", ErrInvalid, min)
+	}
+	if min == "" {
+		min = config.PriorityLow
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	u := p.find(name)
+	if u == nil {
+		return Status{}, ErrNotFound
+	}
+	prev, prevRaw, prevOverride := u.minCaller, u.raw.MinClientPriority, p.overrides[name]
+	u.minCaller = min
+	if u.static {
+		o := p.overrides[name]
+		o.MinClientPriority = &min
+		p.overrides[name] = o
+	} else {
+		u.raw.MinClientPriority = min
+	}
+	if err := p.save(); err != nil {
+		u.minCaller, u.raw.MinClientPriority, p.overrides[name] = prev, prevRaw, prevOverride
+		return Status{}, err
+	}
+	return p.status(u), nil
+}
+
 // SetDefault makes name the default upstream and switches the pool to the
 // default strategy. An empty name clears the default, and a pool on the
 // default strategy goes back to priority. Saved to the pool file.
@@ -793,18 +856,19 @@ type Summary struct {
 
 // SummaryRow is one upstream in a Summary, in the strategy's order.
 type SummaryRow struct {
-	Name             string     `json:"name"`
-	State            string     `json:"state"`
-	Priority         int        `json:"priority"`
-	Fallback         bool       `json:"fallback,omitempty"`
-	Default          bool       `json:"default,omitempty"`
-	RemainingPercent *float64   `json:"remaining_percent,omitempty"`
-	Window           string     `json:"window,omitempty"`
-	ResetsAt         *time.Time `json:"resets_at,omitempty"`
-	CooldownUntil    *time.Time `json:"cooldown_until,omitempty"`
-	CooldownReason   string     `json:"cooldown_reason,omitempty"`
-	Requests         int64      `json:"requests"`
-	Failures         int64      `json:"failures"`
+	Name              string                `json:"name"`
+	State             string                `json:"state"`
+	Priority          int                   `json:"priority"`
+	MinClientPriority config.ClientPriority `json:"min_client_priority"`
+	Fallback          bool                  `json:"fallback,omitempty"`
+	Default           bool                  `json:"default,omitempty"`
+	RemainingPercent  *float64              `json:"remaining_percent,omitempty"`
+	Window            string                `json:"window,omitempty"`
+	ResetsAt          *time.Time            `json:"resets_at,omitempty"`
+	CooldownUntil     *time.Time            `json:"cooldown_until,omitempty"`
+	CooldownReason    string                `json:"cooldown_reason,omitempty"`
+	Requests          int64                 `json:"requests"`
+	Failures          int64                 `json:"failures"`
 }
 
 // Summarize returns the pool's Summary.
@@ -823,7 +887,7 @@ func (p *Pool) Summarize() Summary {
 	}
 	for _, c := range all {
 		st := p.status(c.Upstream)
-		row := SummaryRow{Name: st.Name, State: st.State, Priority: st.Priority, Fallback: st.Fallback,
+		row := SummaryRow{Name: st.Name, State: st.State, Priority: st.Priority, MinClientPriority: st.MinClientPriority, Fallback: st.Fallback,
 			Default: st.Default, CooldownUntil: st.CooldownUntil, CooldownReason: st.CooldownReason,
 			Requests: st.Requests, Failures: st.Failures}
 		if q := st.Quota; q != nil {

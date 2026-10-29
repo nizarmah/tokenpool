@@ -18,6 +18,12 @@ client_keys:
   alice: "<tokenpool keygen output>"
   bob: "<tokenpool keygen output>"
 
+# Optional: rank callers low, normal or high (no entry means normal). An
+# upstream with min_client_priority refuses callers below it.
+# client_priorities:
+#   alice: high
+#   bob: low
+
 # Turns on /admin/upstreams, which adds, removes, pauses and resets
 # upstreams at runtime. Leave it out to keep the admin API off. Upstreams
 # added there are saved to pool_file (mode 0600).
@@ -79,6 +85,7 @@ upstreams:
     token: "<another Anthropic API key, or a claude setup-token>"
     # auth: setup-token
     priority: 2
+    # min_client_priority: high   # only callers ranked high may use this one
 
   # A ChatGPT plan's Codex quota, through the Codex CLI's login file. Sign
   # in once with: CODEX_HOME=~/.config/tokenpool/codex codex login --device-auth
