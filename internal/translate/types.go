@@ -22,6 +22,7 @@ type anthropicRequest struct {
 	Tools         []anthropicTool      `json:"tools,omitempty"`
 	ToolChoice    *anthropicToolChoice `json:"tool_choice,omitempty"`
 	Metadata      *anthropicMetadata   `json:"metadata,omitempty"`
+	Thread        json.RawMessage      `json:"thread,omitempty"`
 }
 
 type anthropicMessage struct {
