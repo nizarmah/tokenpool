@@ -182,7 +182,8 @@ func (s *Server) serve(k kind) http.HandlerFunc {
 			return
 		}
 		req := s.poolRequest(r, head.Model)
-		log := s.log.With("client", clientName(r.Context()), "api", in, "model", head.Model)
+		log := s.log.With("client", clientName(r.Context()), "priority", priorityName(req.Priority),
+			"api", in, "model", head.Model)
 		if req.Model != head.Model {
 			log = log.With("alias_for", req.Model)
 		}
@@ -190,6 +191,15 @@ func (s *Server) serve(k kind) http.HandlerFunc {
 			log = log.With("pinned", true)
 		}
 		sel := s.pool.PickFor(req)
+		if len(sel.Candidates)+len(sel.Unavailable) == 0 && len(sel.Excluded) > 0 {
+			// The model is served, but only by upstreams this caller may not use.
+			msg := fmt.Sprintf("tokenpool: refused by policy: %s, and no other upstream serves model %q",
+				excludedNote(req, sel.Excluded), req.Model)
+			log.Warn("refused by caller priority", "status", http.StatusForbidden, "excluded", sel.Excluded)
+			w.Header().Set(refusedHeader, "caller-priority")
+			writeError(w, in, http.StatusForbidden, msg)
+			return
+		}
 		if len(sel.Candidates)+len(sel.Unavailable) == 0 {
 			msg := fmt.Sprintf("tokenpool: no upstream in the pool serves model %q", req.Model)
 			if req.Pinned {
@@ -278,8 +288,12 @@ func (s *Server) serve(k kind) http.HandlerFunc {
 				status = http.StatusTooManyRequests
 			}
 		}
-		log.Warn("no upstream could serve", "status", status, "reasons", failures)
-		writeError(w, in, status, "tokenpool: no upstream could serve this request: "+strings.Join(failures, "; "))
+		msg := "tokenpool: no upstream could serve this request: " + strings.Join(failures, "; ")
+		if note := excludedNote(req, sel.Excluded); note != "" {
+			msg += "; " + note
+		}
+		log.Warn("no upstream could serve", "status", status, "reasons", failures, "excluded", sel.Excluded)
+		writeError(w, in, status, msg)
 	}
 }
 
@@ -290,8 +304,14 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	log := s.log.With("client", clientName(r.Context()), "api", "count_tokens", "model", head.Model)
-	for _, c := range s.pool.PickFor(s.poolRequest(r, head.Model)).Candidates {
+	req := s.poolRequest(r, head.Model)
+	log := s.log.With("client", clientName(r.Context()), "priority", priorityName(req.Priority),
+		"api", "count_tokens", "model", head.Model)
+	sel := s.pool.PickFor(req)
+	if len(sel.Excluded) > 0 {
+		log.Info("caller priority excludes upstreams", "excluded", sel.Excluded)
+	}
+	for _, c := range sel.Candidates {
 		if c.Format != config.Anthropic {
 			continue
 		}
@@ -347,7 +367,28 @@ func (s *Server) poolRequest(r *http.Request, model string) pool.Request {
 	case "false", "0", "no", "off":
 		pinned = false
 	}
-	return pool.Request{Model: s.cfg.ResolveModel(model), Pinned: pinned}
+	return pool.Request{Model: s.cfg.ResolveModel(model), Pinned: pinned,
+		Priority: s.cfg.PriorityOf(clientName(r.Context()))}
+}
+
+// refusedHeader marks an answer that is a policy decision, not a limit:
+// no upstream the caller may use serves the model.
+const refusedHeader = "X-Tokenpool-Refused"
+
+// excludedNote says which upstreams the caller's priority ruled out, for
+// error messages, or "" when none were.
+func excludedNote(req pool.Request, excluded []string) string {
+	if len(excluded) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("the caller's priority (%s) excludes %s", priorityName(req.Priority), strings.Join(excluded, ", "))
+}
+
+func priorityName(p config.ClientPriority) config.ClientPriority {
+	if p == "" {
+		return config.PriorityLow
+	}
+	return p
 }
 
 // sendRefreshing sends one attempt and, when a ChatGPT login's access

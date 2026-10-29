@@ -26,6 +26,42 @@ const (
 	OpenAI Format = "openai"
 )
 
+// ClientPriority ranks a caller, and the callers an upstream accepts.
+type ClientPriority string
+
+const (
+	// PriorityLow is the lowest caller rank. As an upstream's minimum it
+	// means everyone, and it is the default.
+	PriorityLow ClientPriority = "low"
+	// PriorityNormal is the rank of a caller with no client_priorities entry.
+	PriorityNormal ClientPriority = "normal"
+	// PriorityHigh is the highest caller rank.
+	PriorityHigh ClientPriority = "high"
+)
+
+// Rank orders priorities: low 0, normal 1, high 2. An empty or unknown
+// value ranks as low, so a caller nobody ranked never reaches a restricted
+// upstream by accident.
+func (p ClientPriority) Rank() int {
+	switch p {
+	case PriorityHigh:
+		return 2
+	case PriorityNormal:
+		return 1
+	}
+	return 0
+}
+
+// Valid reports whether p is low, normal or high.
+func (p ClientPriority) Valid() bool {
+	return p == PriorityLow || p == PriorityNormal || p == PriorityHigh
+}
+
+// NormalizePriority lowercases and trims a priority as written.
+func NormalizePriority(p ClientPriority) ClientPriority {
+	return ClientPriority(strings.ToLower(strings.TrimSpace(string(p))))
+}
+
 // Upstream is one entry in the pool: any URL with any token.
 type Upstream struct {
 	// Name identifies the upstream in logs, headers and the admin API.
@@ -68,6 +104,10 @@ type Upstream struct {
 	Fallback bool `yaml:"fallback,omitempty" json:"fallback,omitempty"`
 	// Disabled keeps the upstream in the pool without sending it traffic.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+	// MinClientPriority is the lowest caller priority this upstream serves:
+	// low (the default, everyone), normal or high. Callers below it never
+	// reach the upstream, not even as a fallback.
+	MinClientPriority ClientPriority `yaml:"min_client_priority,omitempty" json:"min_client_priority,omitempty"`
 }
 
 // Cooldowns say how long an upstream sits out after each kind of failure,
@@ -99,6 +139,10 @@ type Config struct {
 	// ClientKeys maps a caller's name (a person or an app) to the key it
 	// calls tokenpool with.
 	ClientKeys map[string]string `yaml:"client_keys"`
+	// ClientPriorities ranks callers by name: low, normal or high. A caller
+	// without an entry is normal. Upstreams can refuse callers below a
+	// rank (min_client_priority).
+	ClientPriorities map[string]ClientPriority `yaml:"client_priorities"`
 	// AllowAnonymous serves requests without a client key. Only for local use.
 	AllowAnonymous bool `yaml:"allow_anonymous"`
 	// AdminKey enables the /admin API. Leave empty to disable it.
@@ -164,12 +208,24 @@ func (c *Config) resolve() error {
 			return fmt.Errorf("client_keys.%s: %w", name, err)
 		}
 	}
+	for name, p := range c.ClientPriorities {
+		c.ClientPriorities[name] = NormalizePriority(p)
+	}
 	for i, u := range c.Upstreams {
 		if c.Upstreams[i], err = u.Resolve(); err != nil {
 			return fmt.Errorf("upstream %q: %w", u.Name, err)
 		}
 	}
 	return nil
+}
+
+// PriorityOf returns the priority of the caller called name: its
+// client_priorities entry, or normal.
+func (c *Config) PriorityOf(name string) ClientPriority {
+	if p, ok := c.ClientPriorities[name]; ok && p != "" {
+		return p
+	}
+	return PriorityNormal
 }
 
 func (c *Config) applyDefaults() {
@@ -242,6 +298,14 @@ func (c *Config) validate() error {
 			return fmt.Errorf("client_keys.%s and client_keys.%s share a key", name, other)
 		}
 		seenKeys[key] = name
+	}
+	for name, p := range c.ClientPriorities {
+		if _, ok := c.ClientKeys[name]; !ok {
+			return fmt.Errorf("client_priorities.%s: no such caller in client_keys", name)
+		}
+		if !p.Valid() {
+			return fmt.Errorf("client_priorities.%s must be low, normal or high, got %q", name, p)
+		}
 	}
 	if c.AdminKey != "" {
 		if err := checkKey("admin_key", c.AdminKey); err != nil {
@@ -341,6 +405,9 @@ func (u Upstream) Validate() error {
 	if u.MaxTokens < 0 {
 		return fmt.Errorf("upstream %q: max_tokens must not be negative", u.Name)
 	}
+	if u.MinClientPriority != "" && !u.MinClientPriority.Valid() {
+		return fmt.Errorf("upstream %q: min_client_priority must be low, normal or high, got %q", u.Name, u.MinClientPriority)
+	}
 	return nil
 }
 
@@ -411,6 +478,7 @@ func (u Upstream) AuthFor(token string) string {
 // Resolve returns a copy with ${ENV_VAR} references expanded.
 func (u Upstream) Resolve() (Upstream, error) {
 	var err error
+	u.MinClientPriority = NormalizePriority(u.MinClientPriority)
 	if u.URL, err = Expand(u.URL); err != nil {
 		return u, fmt.Errorf("url: %w", err)
 	}

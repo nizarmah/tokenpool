@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"sort"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -73,6 +74,7 @@ func run(configPath string, check, jsonLogs bool) error {
 			fmt.Fprintln(os.Stderr, "warning:", exposed)
 		}
 		fmt.Printf("strategy: %s\n", p.Summarize().Strategy)
+		printCallers(os.Stdout, cfg)
 		printPool(os.Stdout, p.List())
 		return nil
 	}
@@ -121,9 +123,21 @@ func run(configPath string, check, jsonLogs bool) error {
 	return nil
 }
 
+// printCallers lists each caller's name and priority. Keys stay out.
+func printCallers(w io.Writer, cfg *config.Config) {
+	names := make([]string, 0, len(cfg.ClientKeys))
+	for name := range cfg.ClientKeys {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Fprintf(w, "caller: %s (%s)\n", name, cfg.PriorityOf(name))
+	}
+}
+
 func printPool(w io.Writer, ups []pool.Status) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ROLE\tPRIORITY\tNAME\tFORMAT\tURL\tMODEL\tTOKEN\tSOURCE\tSTATE")
+	fmt.Fprintln(tw, "ROLE\tPRIORITY\tMIN CALLER\tNAME\tFORMAT\tURL\tMODEL\tTOKEN\tSOURCE\tSTATE")
 	for _, u := range ups {
 		model := u.Model
 		if len(u.Models) > 0 {
@@ -143,8 +157,8 @@ func printPool(w io.Writer, ups []pool.Status) {
 		if u.TokenFile != "" {
 			token = "file:" + u.TokenFile
 		}
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			role, u.Priority, u.Name, u.Format, u.URL, model, token, u.Source, u.State)
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			role, u.Priority, u.MinClientPriority, u.Name, u.Format, u.URL, model, token, u.Source, u.State)
 	}
 	tw.Flush()
 }

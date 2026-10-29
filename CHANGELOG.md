@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Caller priority.** `client_priorities: {name: low|normal|high}` ranks
+  callers (default `normal`), and an upstream's `min_client_priority`
+  (default `low`, everyone) keeps lower callers off it, ahead of any
+  strategy, failover or fallback, on `/v1/messages`, `/v1/responses` and
+  `/v1/messages/count_tokens`. A request that only restricted upstreams can
+  serve gets `403` with `X-Tokenpool-Refused: caller-priority`; a limit
+  error names the upstreams the caller's priority excluded. The admin API
+  shows and sets the field (`POST /admin/upstreams/{name}/min_client_priority`,
+  or POST/PUT of an API upstream), `/admin/status` lists callers, logs carry
+  `priority=`, and `-check` prints a `MIN CALLER` column. Existing configs
+  need no change.
+
 ## v0.2.1 (2026-10-25)
 
 ### Fixed
