@@ -179,6 +179,9 @@ put this at the top of the function:
 Inside a `claude-pool` session, `/status` shows the tokenpool URL as the
 base URL, and tokenpool's log names you as the caller for each request.
 
+Remote Control (`claude rc`) refuses a custom `ANTHROPIC_BASE_URL`. To run it
+through tokenpool, see [contrib/claude-rc](contrib/claude-rc/README.md).
+
 ## Configuration
 
 Everything lives in one YAML file (`-config`, default `tokenpool.yaml` or
