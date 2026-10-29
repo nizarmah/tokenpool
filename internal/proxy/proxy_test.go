@@ -492,6 +492,42 @@ func TestStatefulRequestSkipsClaude(t *testing.T) {
 	}
 }
 
+// A Messages API request on an Anthropic thread carries only the new turns.
+// Native Claude serves it; a translated upstream is skipped, and when none
+// is left tokenpool answers the 400 that makes Claude Code resend the turn
+// with its whole history.
+func TestThreadRequestSkipsTranslatedUpstreams(t *testing.T) {
+	threaded := `{"model":"claude-sonnet-5","max_tokens":100,"stream":true,
+		"thread":{"type":"continue","previous_message_id":"msg_1"},
+		"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]}]}`
+	claude := newFake(t, claudeStream)
+	grok := newFake(t, grokStream)
+	srv, _ := newProxy(t, poolYAML("", claudeUp(claude.URL), grokUp(grok.URL)), "")
+	res, body := call(t, "POST", srv.URL+"/v1/messages", "tp-alice-0123456789", threaded)
+	if res.StatusCode != 200 || res.Header.Get("X-Tokenpool-Upstream") != "claude" || len(grok.calls()) != 0 {
+		t.Fatalf("native: status %d upstream %q grok calls %d: %s", res.StatusCode,
+			res.Header.Get("X-Tokenpool-Upstream"), len(grok.calls()), body)
+	}
+	if claude.calls()[0].body["thread"] == nil {
+		t.Errorf("thread not passed to claude: %s", claude.calls()[0].raw)
+	}
+
+	claude.setReply(rateLimited)
+	res, body = call(t, "POST", srv.URL+"/v1/messages", "tp-alice-0123456789", threaded)
+	if res.StatusCode != 400 || !strings.Contains(body, `"error_code":"thread_unsupported_request"`) || len(grok.calls()) != 0 {
+		t.Errorf("claude limited: status %d grok calls %d body %s", res.StatusCode, len(grok.calls()), body)
+	}
+
+	srv, p := newProxy(t, poolYAML("", grokUp(grok.URL)), "")
+	res, body = call(t, "POST", srv.URL+"/v1/messages", "tp-alice-0123456789", threaded)
+	if res.StatusCode != 400 || !strings.Contains(body, `"error_code":"thread_unsupported_request"`) || len(grok.calls()) != 0 {
+		t.Errorf("grok only: status %d body %s", res.StatusCode, body)
+	}
+	if st, _ := p.Get("grok"); st.State != "available" {
+		t.Errorf("grok benched for a thread request: %+v", st)
+	}
+}
+
 func TestEveryUpstreamLimited(t *testing.T) {
 	claude := newFake(t, rateLimited)
 	grok := newFake(t, rateLimited)

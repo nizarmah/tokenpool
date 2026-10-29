@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Claude Code on a translated upstream no longer fails with "No tool call
+  found for function call output with call_id ...". When Claude Code
+  believes it talks to api.anthropic.com (Remote Control behind a proxy,
+  for one), it continues a server-side thread (`"thread": {"type":
+  "continue"}`) and sends only the new turns: a tool result without the
+  call it answers. A Responses upstream cannot see that thread. tokenpool
+  now skips translated upstreams for a thread request and, when no Claude
+  upstream can take it, answers the 400 `thread_unsupported_request`.
+  Claude Code then resends the turn with its whole history and keeps the
+  session stateless on that model.
+
 ## v0.2.1 (2026-10-25)
 
 ### Fixed

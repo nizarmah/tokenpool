@@ -45,6 +45,18 @@ func AnthropicError(status int, message string) []byte {
 	return b
 }
 
+// AnthropicThreadUnsupported is the 400 first-party Anthropic answers for a
+// thread it will not serve. Claude Code reads details.error_code and resends
+// the turn without a thread, with its whole history.
+func AnthropicThreadUnsupported(message string) []byte {
+	b, _ := json.Marshal(obj{
+		"type": "error",
+		"error": obj{"type": "invalid_request_error", "message": message,
+			"details": obj{"error_code": "thread_unsupported_request"}},
+	})
+	return b
+}
+
 // OpenAIError renders an error body the OpenAI SDK understands.
 func OpenAIError(status int, message string) []byte {
 	b, _ := json.Marshal(obj{

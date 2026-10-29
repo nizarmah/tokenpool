@@ -200,7 +200,7 @@ func (s *Server) serve(k kind) http.HandlerFunc {
 		}
 
 		failures := append([]string{}, sel.Unavailable...)
-		attempted, allLimits := 0, true
+		attempted, allLimits, threaded := 0, true, false
 		for _, c := range sel.Candidates {
 			attempted++
 			res, chatgpt, err := s.sendRefreshing(r, k, c, body, log)
@@ -214,10 +214,11 @@ func (s *Server) serve(k kind) http.HandlerFunc {
 					writeError(w, in, http.StatusBadRequest, "tokenpool: "+bad.Error())
 					return
 				}
-				if errors.Is(err, translate.ErrStateful) {
+				if errors.Is(err, translate.ErrStateful) || errors.Is(err, translate.ErrThread) {
 					log.Info("skipping", "upstream", c.Name, "reason", err.Error())
 					failures = append(failures, c.Name+": "+err.Error())
 					allLimits = false
+					threaded = threaded || errors.Is(err, translate.ErrThread)
 					continue
 				}
 				reason := "unreachable: " + err.Error()
@@ -269,6 +270,15 @@ func (s *Server) serve(k kind) http.HandlerFunc {
 				"reason", v.reason, "cooldown", v.cooldown.String())
 			failures = append(failures, c.Name+": "+v.reason)
 			allLimits = allLimits && v.limit
+		}
+
+		if threaded {
+			// Claude Code resends the turn without the thread, which any upstream can serve.
+			log.Info("refused a thread no upstream could serve", "reasons", failures)
+			writeJSON(w, http.StatusBadRequest, json.RawMessage(translate.AnthropicThreadUnsupported(
+				"tokenpool: no Claude upstream can serve this thread now; resend the turn without a thread: "+
+					strings.Join(failures, "; "))))
+			return
 		}
 
 		status := http.StatusServiceUnavailable
@@ -373,7 +383,7 @@ func (s *Server) send(r *http.Request, k kind, c pool.Candidate, body []byte) (r
 	}
 	chatgpt = c.IsChatGPT(cred)
 	upBody, err := s.upstreamBody(k, c, body, chatgpt)
-	if errors.Is(err, translate.ErrStateful) {
+	if errors.Is(err, translate.ErrStateful) || errors.Is(err, translate.ErrThread) {
 		return nil, chatgpt, err
 	}
 	if err != nil {

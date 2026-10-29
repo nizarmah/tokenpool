@@ -151,6 +151,24 @@ func TestResponsesToAnthropic(t *testing.T) {
 	}
 }
 
+// Claude Code on first-party Anthropic continues a server-side thread and
+// sends only the new turns, so a Responses upstream cannot rebuild the
+// conversation.
+func TestAnthropicThreadIsStateful(t *testing.T) {
+	for _, threaded := range []string{
+		`{"model":"m","thread":{"type":"continue","previous_message_id":"msg_1"},
+		  "messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]}]}`,
+		`{"model":"m","thread":{"type":"create"},"messages":[{"role":"user","content":"hi"}]}`,
+	} {
+		if _, err := AnthropicToResponses([]byte(threaded)); !errors.Is(err, ErrThread) {
+			t.Errorf("AnthropicToResponses(%s) err = %v, want ErrThread", threaded, err)
+		}
+	}
+	if _, err := AnthropicToResponses([]byte(`{"model":"m","thread":null,"messages":[{"role":"user","content":"hi"}]}`)); err != nil {
+		t.Errorf("null thread: %v", err)
+	}
+}
+
 func TestResponses(t *testing.T) {
 	upstream := `{
 	  "id": "resp_1", "object": "response", "model": "grok-4", "status": "completed",

@@ -15,6 +15,12 @@ import (
 // API upstream has none of it, so it cannot serve the request.
 var ErrStateful = errors.New("the request continues a stored response, which a Messages API upstream cannot see")
 
+// ErrThread means a Messages API request opens or continues a thread that
+// first-party Anthropic stores ("thread": {"type": "continue", ...}).
+// Claude Code then sends only the new turns, so a Responses upstream would
+// see tool results without the calls they answer.
+var ErrThread = errors.New("the request uses an Anthropic server-side thread, which a Responses upstream cannot see")
+
 // AnthropicToResponses converts a Messages API request into a Responses API
 // request. Anthropic-only features (thinking, cache_control, server tools,
 // PDF documents) are dropped, and so are stop_sequences, which the
@@ -23,6 +29,9 @@ func AnthropicToResponses(body []byte) ([]byte, error) {
 	var req anthropicRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("invalid Messages API request: %w", err)
+	}
+	if len(req.Thread) > 0 && string(req.Thread) != "null" {
+		return nil, ErrThread
 	}
 	out := responsesOutRequest{
 		Model:        req.Model,
