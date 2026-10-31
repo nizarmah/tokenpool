@@ -147,34 +147,37 @@ func configUpstreamAuth(t *testing.T, doc string) Upstream {
 
 func TestParseErrors(t *testing.T) {
 	tests := map[string]string{
-		"no client keys":         `upstreams: []`,
-		"unset env var":          "client_keys: {a: ${TP_TEST_UNSET_VAR}}",
-		"unknown field":          "allow_anonymous: true\nlisten_addr: :1",
-		"bad format":             "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: grpc}]",
-		"bad url":                "allow_anonymous: true\nupstreams: [{name: a, url: 'x.com', format: openai}]",
-		"bad name":               "allow_anonymous: true\nupstreams: [{name: 'a b', url: 'http://x', format: openai}]",
-		"duplicate name":         "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai}, {name: a, url: 'http://y', format: openai}]",
-		"bad auth":               "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, auth: basic}]",
-		"bad strategy":           "allow_anonymous: true\nstrategy: random",
-		"shared key":             "client_keys: {a: kkkkkkkkkkkkkkkkkk, b: kkkkkkkkkkkkkkkkkk}",
-		"admin=client key":       "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nadmin_key: kkkkkkkkkkkkkkkkkk",
-		"short client key":       "client_keys: {a: tooshort}",
-		"short admin key":        "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nadmin_key: short",
-		"placeholder key":        "client_keys: {a: '<tokenpool keygen output>'}",
-		"token and token_file":   "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token: t, token_file: /f}]",
-		"token_field alone":      "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token_field: x}]",
-		"placeholder token":      "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token: '<xAI API key>'}]",
-		"chat completions url":   "allow_anonymous: true\nupstreams: [{name: a, url: 'https://api.x.ai/v1/chat/completions', format: openai}]",
-		"chatgpt on anthropic":   "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: anthropic, auth: chatgpt, token_file: /f}]",
-		"chatgpt inline token":   "allow_anonymous: true\nupstreams: [{name: a, format: openai, auth: chatgpt, token: t}]",
-		"bad default name":       "allow_anonymous: true\ndefault_upstream: 'a b'",
-		"empty alias":            "allow_anonymous: true\nmodel_aliases: {best: ''}",
-		"wildcard alias":         "allow_anonymous: true\nmodel_aliases: {'best-*': gpt-5}",
-		"chained alias":          "allow_anonymous: true\nmodel_aliases: {best: fast, fast: gpt-5}",
-		"bad caller priority":    "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nclient_priorities: {a: urgent}",
-		"empty caller priority":  "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nclient_priorities: {a: ''}",
-		"priority for no caller": "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nclient_priorities: {b: high}",
-		"bad min priority":       "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, min_client_priority: urgent}]",
+		"no client keys":          `upstreams: []`,
+		"unset env var":           "client_keys: {a: ${TP_TEST_UNSET_VAR}}",
+		"unknown field":           "allow_anonymous: true\nlisten_addr: :1",
+		"bad format":              "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: grpc}]",
+		"bad url":                 "allow_anonymous: true\nupstreams: [{name: a, url: 'x.com', format: openai}]",
+		"bad name":                "allow_anonymous: true\nupstreams: [{name: 'a b', url: 'http://x', format: openai}]",
+		"duplicate name":          "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai}, {name: a, url: 'http://y', format: openai}]",
+		"bad auth":                "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, auth: basic}]",
+		"bad strategy":            "allow_anonymous: true\nstrategy: random",
+		"shared key":              "client_keys: {a: kkkkkkkkkkkkkkkkkk, b: kkkkkkkkkkkkkkkkkk}",
+		"admin=client key":        "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nadmin_key: kkkkkkkkkkkkkkkkkk",
+		"short client key":        "client_keys: {a: tooshort}",
+		"short admin key":         "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nadmin_key: short",
+		"placeholder key":         "client_keys: {a: '<tokenpool keygen output>'}",
+		"token and token_file":    "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token: t, token_file: /f}]",
+		"token_field alone":       "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token_field: x}]",
+		"placeholder token":       "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, token: '<xAI API key>'}]",
+		"chat completions url":    "allow_anonymous: true\nupstreams: [{name: a, url: 'https://api.x.ai/v1/chat/completions', format: openai}]",
+		"chatgpt on anthropic":    "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: anthropic, auth: chatgpt, token_file: /f}]",
+		"chatgpt inline token":    "allow_anonymous: true\nupstreams: [{name: a, format: openai, auth: chatgpt, token: t}]",
+		"bad default name":        "allow_anonymous: true\ndefault_upstream: 'a b'",
+		"empty alias":             "allow_anonymous: true\nmodel_aliases: {best: ''}",
+		"wildcard alias":          "allow_anonymous: true\nmodel_aliases: {'best-*': gpt-5}",
+		"chained alias":           "allow_anonymous: true\nmodel_aliases: {best: fast, fast: gpt-5}",
+		"bad caller priority":     "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nclient_priorities: {a: urgent}",
+		"empty caller priority":   "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nclient_priorities: {a: ''}",
+		"priority for no caller":  "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nclient_priorities: {b: high}",
+		"upstreams for no caller": "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nclient_upstreams: {b: [x]}",
+		"empty caller upstream":   "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nclient_upstreams: {a: ['']}",
+		"caller upstream twice":   "client_keys: {a: kkkkkkkkkkkkkkkkkk}\nclient_upstreams: {a: [x, x]}",
+		"bad min priority":        "allow_anonymous: true\nupstreams: [{name: a, url: 'http://x', format: openai, min_client_priority: urgent}]",
 	}
 	for name, doc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -347,5 +350,21 @@ func TestConfigWithoutPrioritiesStillLoads(t *testing.T) {
 	}
 	if cfg.PriorityOf("a") != PriorityNormal || cfg.Upstreams[0].MinClientPriority != "" {
 		t.Errorf("defaults changed: %q, %q", cfg.PriorityOf("a"), cfg.Upstreams[0].MinClientPriority)
+	}
+}
+
+func TestClientUpstreams(t *testing.T) {
+	cfg, err := Parse([]byte(`
+client_keys: {alice: kkkkkkkkkkkkkkkkkk, bob: jjjjjjjjjjjjjjjjjj}
+client_upstreams: {alice: [codex, claude]}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.UpstreamsFor("alice"), ","); got != "codex,claude" {
+		t.Errorf("alice tries %q first, want codex,claude", got)
+	}
+	if got := cfg.UpstreamsFor("bob"); len(got) != 0 {
+		t.Errorf("bob tries %v first, want the pool's own order", got)
 	}
 }

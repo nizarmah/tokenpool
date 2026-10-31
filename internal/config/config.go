@@ -143,6 +143,11 @@ type Config struct {
 	// without an entry is normal. Upstreams can refuse callers below a
 	// rank (min_client_priority).
 	ClientPriorities map[string]ClientPriority `yaml:"client_priorities"`
+	// ClientUpstreams lists, per caller, the upstreams it tries first, in
+	// that order. The rest of the pool follows in its usual order, as
+	// backup. It only reorders: min_client_priority, pinning and model
+	// maps still decide which upstreams the caller can reach.
+	ClientUpstreams map[string][]string `yaml:"client_upstreams"`
 	// AllowAnonymous serves requests without a client key. Only for local use.
 	AllowAnonymous bool `yaml:"allow_anonymous"`
 	// AdminKey enables the /admin API. Leave empty to disable it.
@@ -217,6 +222,12 @@ func (c *Config) resolve() error {
 		}
 	}
 	return nil
+}
+
+// UpstreamsFor returns the upstreams the caller called name tries first:
+// its client_upstreams entry, or none.
+func (c *Config) UpstreamsFor(name string) []string {
+	return c.ClientUpstreams[name]
 }
 
 // PriorityOf returns the priority of the caller called name: its
@@ -305,6 +316,21 @@ func (c *Config) validate() error {
 		}
 		if !p.Valid() {
 			return fmt.Errorf("client_priorities.%s must be low, normal or high, got %q", name, p)
+		}
+	}
+	for name, ups := range c.ClientUpstreams {
+		if _, ok := c.ClientKeys[name]; !ok {
+			return fmt.Errorf("client_upstreams.%s: no such caller in client_keys", name)
+		}
+		seen := make(map[string]bool, len(ups))
+		for _, u := range ups {
+			if strings.TrimSpace(u) == "" {
+				return fmt.Errorf("client_upstreams.%s: empty upstream name", name)
+			}
+			if seen[u] {
+				return fmt.Errorf("client_upstreams.%s lists %s twice", name, u)
+			}
+			seen[u] = true
 		}
 	}
 	if c.AdminKey != "" {

@@ -377,8 +377,9 @@ func (s *Server) poolRequest(r *http.Request, model string) pool.Request {
 	case "false", "0", "no", "off":
 		pinned = false
 	}
+	caller := clientName(r.Context())
 	return pool.Request{Model: s.cfg.ResolveModel(model), Pinned: pinned,
-		Priority: s.cfg.PriorityOf(clientName(r.Context()))}
+		Priority: s.cfg.PriorityOf(caller), Prefer: s.cfg.UpstreamsFor(caller)}
 }
 
 // refusedHeader marks an answer that is a policy decision, not a limit:

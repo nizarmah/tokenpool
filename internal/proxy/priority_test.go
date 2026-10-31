@@ -271,3 +271,27 @@ func TestAdminMinClientPriorityRoundTrip(t *testing.T) {
 		t.Errorf("alice after restart: %d %s", res.StatusCode, body)
 	}
 }
+
+func TestCallerUpstreamsGoFirstThenFailOver(t *testing.T) {
+	first := newFake(t, claudeMessage)
+	preferred := newFake(t, rateLimited)
+	upstreams := callerPriorities + "client_upstreams:\n  alice: [preferred]\n"
+	srv, _ := newProxy(t, poolYAML(upstreams, subUp("first", first.URL, 1), subUp("preferred", preferred.URL, 2)), "")
+
+	// bob has no preference: the pool's order.
+	res, body := call(t, "POST", srv.URL+"/v1/messages", bob, messagesBody)
+	if res.StatusCode != 200 || res.Header.Get("X-Tokenpool-Upstream") != "first" {
+		t.Fatalf("bob: %d %s from %q", res.StatusCode, body, res.Header.Get("X-Tokenpool-Upstream"))
+	}
+	if len(preferred.calls()) != 0 {
+		t.Fatalf("bob reached the preferred upstream")
+	}
+	// alice tries hers first; it is limited, so the pool serves her.
+	res, body = call(t, "POST", srv.URL+"/v1/messages", alice, messagesBody)
+	if res.StatusCode != 200 || res.Header.Get("X-Tokenpool-Upstream") != "first" {
+		t.Fatalf("alice: %d %s from %q", res.StatusCode, body, res.Header.Get("X-Tokenpool-Upstream"))
+	}
+	if len(preferred.calls()) != 1 {
+		t.Errorf("preferred upstream saw %d calls, want alice's one", len(preferred.calls()))
+	}
+}

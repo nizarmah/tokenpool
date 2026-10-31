@@ -15,6 +15,10 @@
   or POST/PUT of an API upstream), `/admin/status` lists callers, logs carry
   `priority=`, and `-check` prints a `MIN CALLER` column. Existing configs
   need no change.
+- **Caller upstreams.** `client_upstreams: {name: [upstream, ...]}` sends a
+  caller to those upstreams first, in order, with the rest of the pool
+  behind them as backup. It reorders only; caller priority, pinning and
+  model maps still apply. `/admin/status` lists each caller's upstreams.
 
 ### Fixed
 

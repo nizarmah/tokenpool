@@ -138,6 +138,9 @@ type Request struct {
 	// min_client_priority ranks above it is skipped. An empty Priority
 	// ranks as low.
 	Priority config.ClientPriority
+	// Prefer names upstreams to try first, in this order (the caller's
+	// client_upstreams). It reorders candidates and never adds one.
+	Prefer []string
 }
 
 // Selection is the result of Pick.
@@ -364,7 +367,30 @@ func (p *Pool) PickFor(req Request) Selection {
 		p.rr++
 		rotateTiers(sel.Candidates, p.rr)
 	}
+	preferFirst(sel.Candidates, req.Prefer)
 	return sel
+}
+
+// preferFirst moves the candidates named in prefer to the front, in
+// prefer's order, and keeps the others behind them in their order.
+func preferFirst(c []Candidate, prefer []string) {
+	if len(prefer) == 0 || len(c) < 2 {
+		return
+	}
+	rank := make(map[string]int, len(prefer))
+	for i, name := range prefer {
+		if _, dup := rank[name]; !dup {
+			rank[name] = i
+		}
+	}
+	sort.SliceStable(c, func(i, j int) bool {
+		ri, iok := rank[c[i].Name]
+		rj, jok := rank[c[j].Name]
+		if iok != jok {
+			return iok
+		}
+		return iok && ri < rj
+	})
 }
 
 // effectiveMin names the caller priority an upstream needs: low when unset.

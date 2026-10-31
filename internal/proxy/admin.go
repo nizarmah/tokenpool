@@ -135,12 +135,14 @@ type statusView struct {
 type callerView struct {
 	Name     string                `json:"name"`
 	Priority config.ClientPriority `json:"priority"`
+	// Upstreams are the upstreams the caller tries first (client_upstreams).
+	Upstreams []string `json:"upstreams,omitempty"`
 }
 
 func (s *Server) status() statusView {
 	callers := make([]callerView, 0, len(s.cfg.ClientKeys))
 	for name := range s.cfg.ClientKeys {
-		callers = append(callers, callerView{Name: name, Priority: s.cfg.PriorityOf(name)})
+		callers = append(callers, callerView{Name: name, Priority: s.cfg.PriorityOf(name), Upstreams: s.cfg.UpstreamsFor(name)})
 	}
 	sort.Slice(callers, func(i, j int) bool { return callers[i].Name < callers[j].Name })
 	return statusView{Summary: s.pool.Summarize(), PinModels: s.cfg.PinModels,

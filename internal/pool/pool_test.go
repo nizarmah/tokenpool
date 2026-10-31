@@ -363,3 +363,47 @@ func TestMinClientPriorityPersists(t *testing.T) {
 		t.Errorf("low caller reaches %q", got)
 	}
 }
+
+func TestPreferReordersWithoutAdding(t *testing.T) {
+	paid := restricted("paid", 0, config.PriorityHigh)
+	claude := up("claude", 1)
+	codex := up("codex", 3)
+	backup := up("backup", 2)
+	backup.Fallback = true
+	ups := []config.Upstream{paid, claude, codex, backup}
+
+	for _, strategy := range []string{"priority", "most_quota", "default"} {
+		t.Run(strategy, func(t *testing.T) {
+			p, err := Open(Options{Strategy: strategy, Default: "claude", Upstreams: ups})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, tc := range []struct {
+				prefer []string
+				prio   config.ClientPriority
+				want   string
+			}{
+				{nil, config.PriorityNormal, "claude,codex,backup"},
+				{[]string{"codex"}, config.PriorityNormal, "codex,claude,backup"},
+				{[]string{"backup", "codex"}, config.PriorityNormal, "backup,codex,claude"},
+				{[]string{"nosuch", "codex"}, config.PriorityNormal, "codex,claude,backup"},
+				// A preference never reaches an upstream the caller's priority excludes.
+				{[]string{"paid", "codex"}, config.PriorityNormal, "codex,claude,backup"},
+				{[]string{"paid", "codex"}, config.PriorityHigh, "paid,codex,claude,backup"},
+			} {
+				got := names(p.PickFor(Request{Model: "m", Priority: tc.prio, Prefer: tc.prefer}).Candidates)
+				if got != tc.want {
+					t.Errorf("prefer %v as %s: candidates %s, want %s", tc.prefer, tc.prio, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestPreferredUpstreamCoolingFallsBackToPool(t *testing.T) {
+	p, _ := New("priority", []config.Upstream{up("claude", 1), up("codex", 2)}, "")
+	p.Fail(p.find("codex"), 429, time.Hour, "limited")
+	if got := names(p.PickFor(Request{Model: "m", Prefer: []string{"codex"}}).Candidates); got != "claude" {
+		t.Errorf("codex limited: candidates %s, want claude", got)
+	}
+}

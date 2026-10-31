@@ -24,6 +24,11 @@ client_keys:
 #   alice: high
 #   bob: low
 
+# Optional: upstreams a caller tries first, in order; the rest of the pool
+# follows as backup.
+# client_upstreams:
+#   bob: [codex]
+
 # Turns on /admin/upstreams, which adds, removes, pauses and resets
 # upstreams at runtime. Leave it out to keep the admin API off. Upstreams
 # added there are saved to pool_file (mode 0600).

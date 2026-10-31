@@ -304,6 +304,7 @@ keeps showing the old copy.
 | `listen` | `:8080` | Address to serve on. `127.0.0.1:8080` accepts local connections only. |
 | `client_keys` | required | `name: key` per caller. Names show up in the logs. |
 | `client_priorities` | none | `name: low`, `normal` or `high` per caller. A caller left out is `normal`. See [Caller priority](#caller-priority). |
+| `client_upstreams` | none | `name: [upstream, ...]` per caller: upstreams that caller tries first, in order. See [Caller upstreams](#caller-upstreams). |
 | `allow_anonymous` | `false` | Serve requests without a key. Local testing only. |
 | `admin_key` | unset (admin API off) | Key for `/admin`. Must differ from every caller key. |
 | `pool_file` | unset | Where admin-added upstreams are saved. A relative path sits next to the config. |
@@ -498,6 +499,24 @@ one. Config upstreams keep the change in `pool_file`, like a priority:
 curl -X POST localhost:8080/admin/upstreams/claude-api/min_client_priority -H "$A" \
   -d '{"min_client_priority":"normal"}'
 ```
+
+### Caller upstreams
+
+`client_upstreams` sends one caller to the upstreams you name before the
+rest of the pool, for example a chat bot that should run on Codex and keep
+the Claude subscriptions for people:
+
+```yaml
+client_upstreams:
+  bot: [codex]                     # Codex first; the pool's usual order after it
+```
+
+The named upstreams go first, in the order listed. Every other upstream
+the caller can use follows in the strategy's order, so when `codex` is
+limited the bot fails over to Claude as usual. It only reorders:
+`min_client_priority`, pinning and model maps still decide what the caller
+can reach, and a name that matches no upstream is skipped. `/admin/status`
+lists each caller's upstreams. Set it in the config file only.
 
 ## Quota tracking
 
